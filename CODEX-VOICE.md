@@ -12,6 +12,7 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 | Voice-first TUI: auto-start, spoken approvals with confirmation, spoken status | `codex-rs/tui` | Tested (no-audio harness). Live audio: verify on a Mac. |
 | Local voice (recommended): local speech-to-text and text-to-speech, no OpenAI realtime service | `codex-rs/local-voice`, `codex-rs/tui/src/chatwidget/realtime/local_voice.rs` | Engine tested with fake audio commands; TUI wiring tested with a fake engine. Live audio: verify on a Mac (`HANDOFF.md`, "Local voice on the Mac"). |
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
+| Claude Code agent sessions (`codex --agent claude-code`), the T3 Code way | `codex-rs/claude-agent-backend`, `codex-rs/tui/src/agent_backend.rs` | Tested against a fake `claude` CLI (stream-json + SDK control protocol). Real `claude` login: verify on a Mac (`HANDOFF.md`, inbox #4). |
 | Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Wired into the TUI. |
 | Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator`, `codex-rs/tui/src/app/voice_command*.rs` | Wired into the TUI for this machine's agents and for the machines in `[realtime] voice_machines` (over SSH). Tested against fake app servers and a fake `ssh`; not yet with a real remote host or a live voice session. |
 | Approvals from agents on other machines, by voice or keyboard | `codex-rs/tui/src/app/voice_remote_approvals.rs`, `voice_command_remote.rs` | Tested against fake app servers and a fake `ssh`; not yet with a real remote host. |
@@ -202,6 +203,36 @@ The catalog tells Codex about Claude's context window and enables the
 apply_patch tool. See `codex-rs/anthropic-proxy/README.md` for the full mapping
 and known gaps (OpenAI-hosted tools such as web search are dropped).
 
+## Claude Code sessions
+
+Run the session on Claude Code instead of Codex. The `claude` CLI does the
+work with its own tools, permissions and login (no API key); the TUI, its
+approval overlay, voice approvals and voice commands work unchanged.
+
+```bash
+claude                                   # once: log in with /login
+codex --agent claude-code                # Claude Code's default model
+codex --agent claude-code -m opus        # or any id `claude` accepts
+codex --agent claude-code --claude-bin /opt/homebrew/bin/claude
+```
+
+- The header and `/status` say "Claude Code". `-m` (or `model` in config.toml)
+  is passed as `--model` only when it names a Claude model.
+- `/model` lists the models the CLI reports, plus claude-fable-5-2,
+  claude-opus-5-5, claude-sonnet-5-5 and claude-haiku-5-5. Picking one, or
+  saying "switch to opus" / "sonnet" / "haiku" / "fable", switches the running
+  session (`set_model`) without restarting it. It is not saved as Codex's
+  default model.
+- Claude Code's permission prompts appear as Codex approvals: shell commands
+  as command approvals ("Claude Code wants to run …" when spoken), edits with
+  their diff, other tools as permission prompts, questions as a question form.
+  Approve for this session adds a session rule in Claude Code; Cancel also
+  stops the turn.
+- One backend per process: a Claude Code session cannot be combined with
+  `--remote`, and Codex and Claude threads do not mix yet. Images, steering a
+  running turn and history replay on resume are not supported yet. See
+  `codex-rs/claude-agent-backend/README.md` for the wire format and mapping.
+
 ## Other machines
 
 ```bash
@@ -227,4 +258,5 @@ authentication; no tokens are sent. Discovery is ported from T3 Code (MIT).
 ## Credits
 
 - OpenAI Codex, Apache-2.0: the base of this fork.
-- T3 Code (pingdotgg/t3code), MIT: Tailscale/SSH discovery approach.
+- T3 Code (pingdotgg/t3code), MIT: Tailscale/SSH discovery approach, and the
+  Claude Code adapter design (`ClaudeAdapterV2`, `ClaudeModelCatalog`).

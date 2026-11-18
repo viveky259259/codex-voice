@@ -42,11 +42,21 @@ pub(crate) fn with_border_with_inner_width(
 
 /// Brand title shared by the session header and the status card; each owns its own indentation.
 pub(crate) fn codex_title(version: &str) -> Vec<Span<'static>> {
-    vec![
+    agent_title_spans(version, crate::agent_backend::is_claude_code())
+}
+
+/// A Claude Code session is titled as one; Codex's version stays alongside.
+pub(crate) fn agent_title_spans(version: &str, claude_code: bool) -> Vec<Span<'static>> {
+    let mut spans = vec![
         ">_ ".fg(accent_color()),
-        "OpenAI Codex".bold(),
-        format!(" (v{version})").dim(),
-    ]
+        crate::agent_backend::agent_title(claude_code).bold(),
+    ];
+    if claude_code {
+        spans.push(format!(" (codex-voice v{version})").dim());
+    } else {
+        spans.push(format!(" (v{version})").dim());
+    }
+    spans
 }
 
 #[derive(Debug)]
@@ -406,7 +416,11 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(format!("OpenAI Codex (v{})", self.version)),
+            Line::from(format!(
+                "{} (v{})",
+                crate::agent_backend::agent_title(crate::agent_backend::is_claude_code()),
+                self.version
+            )),
             Line::from(format!(
                 "model: {}{}",
                 self.model,

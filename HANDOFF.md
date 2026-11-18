@@ -15,6 +15,49 @@ test steps. Report results as a comment on the issue: on success, set
 `status: verified on Mac` and close it. The outbox below still works if you
 can't comment on issues.
 
+### 2026-11-18 #4 (issue #27): Claude Code agent sessions in the TUI
+
+`codex --agent claude-code` runs the session on the `claude` CLI (stream-json +
+Agent SDK control protocol, the CLI's own login). Commit on `wip`: "Claude
+Code agent sessions in the TUI (the T3 Code way)". Tested in the cloud only
+against a fake `claude`; nothing has run against a real login yet.
+
+1. Update and build (repo root):
+   ```bash
+   git fetch origin && git checkout wip && git pull --ff-only
+   cd codex-rs && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build -p codex-cli && cd ..
+   cd codex-rs && cargo test -p codex-claude-agent-backend && \
+     RUST_MIN_STACK=8388608 cargo test -p codex-tui --lib -- claude_code && cd ..
+   ```
+2. Claude Code installed and logged in: `claude --version`, then run `claude`
+   once and `/login` if it asks. No ANTHROPIC_API_KEY is needed; unset it so
+   the test uses the login (`unset ANTHROPIC_API_KEY`).
+3. In a scratch git repo (`mkdir /tmp/cc27 && cd /tmp/cc27 && git init`):
+   `/ABS/PATH/codex-rs/target/debug/codex --agent claude-code`. Check: the
+   header says "Claude Code (codex-voice v…)", no Codex login screen, no
+   warning "does not report a login". Keep your `[realtime] backend = "local"`
+   config from #3 so voice starts.
+4. `/model`: the list shows the CLI's models (names and effort levels) plus
+   claude-fable-5-2, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5.
+   Pick Sonnet, then ask "which model are you?". Then say "switch to opus" and
+   ask again. Neither switch should restart the session (same conversation).
+5. Ask: "create notes.md containing hello, then run ls -la". Expect an edit
+   approval showing the diff, then a shell approval. Answer the edit by
+   keyboard (approve), and the shell one by voice: "approve" → "confirm".
+   Check the spoken prompt says "Claude Code wants to run ls -la", the command
+   output appears in its cell, and notes.md exists.
+6. Ask for another edit and deny it ("no"): the file stays unchanged and the
+   edit cell shows declined. Then ask for a long task and press Esc: the turn
+   ends as interrupted.
+7. `/status` and the token usage after a turn; note what they show.
+8. Resume: quit, then run `codex --agent claude-code resume <session id>`
+   (the id is the newest `~/.claude/projects/*/<id>.jsonl`). Unverified: say
+   whether it continues with the earlier context (earlier turns are not
+   replayed on screen; that is expected).
+9. Report on issue #27: each step pass/fail, the CLI version (`claude
+   --version`), and for failures the log tail (`~/.codex/log/codex-tui.log`)
+   and any error text shown in the TUI.
+
 ### 2026-11-18 #3 (issues #13, #17, #18): local voice in the TUI landed
 
 Commit `7fa01ab` on wip (and on codex-voice). `/voice`, F8 and auto-start now

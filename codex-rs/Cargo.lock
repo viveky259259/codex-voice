@@ -2596,6 +2596,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-claude-agent-backend"
+version = "0.0.0"
+dependencies = [
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "codex-protocol",
+ "codex-utils-absolute-path",
+ "codex-utils-path-uri",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "codex-cli"
 version = "0.0.0"
 dependencies = [
@@ -5338,6 +5357,7 @@ dependencies = [
  "codex-arg0",
  "codex-backend-client",
  "codex-build-info",
+ "codex-claude-agent-backend",
  "codex-cloud-config",
  "codex-config",
  "codex-connectors",

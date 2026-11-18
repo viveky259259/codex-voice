@@ -3256,6 +3256,10 @@ mod workspace_roots_tests;
 mod prompt_history_tests;
 
 #[cfg(test)]
+#[path = "app_server_session/claude_code_tests.rs"]
+mod claude_code_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;

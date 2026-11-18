@@ -338,7 +338,10 @@ fn capitalize_first(text: &str) -> String {
 pub(crate) fn approval_request_prompt(request: &ApprovalRequest) -> String {
     let subject = remote_agent_phrase(request)
         .map(|phrase| capitalize_first(&phrase))
-        .unwrap_or_else(|| "Codex".to_string());
+        .unwrap_or_else(|| {
+            crate::agent_backend::spoken_agent_name(crate::agent_backend::is_claude_code())
+                .to_string()
+        });
     limit_words(
         &format!(
             "{subject} wants to {} Say approve or deny.",

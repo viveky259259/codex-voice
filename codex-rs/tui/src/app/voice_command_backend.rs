@@ -540,17 +540,33 @@ pub(crate) fn activity_item(payload: &ThreadItemPayload) -> ActivityItem {
 /// The models "switch to opus" can pick: every catalog model by slug, also
 /// spoken by its display name.
 pub(crate) fn voice_models(presets: &[ModelPreset]) -> Vec<ModelRef> {
+    voice_models_for(presets, crate::agent_backend::is_claude_code())
+}
+
+/// In a Claude Code session the first model of each family is also spoken by
+/// its family name ("switch to opus").
+pub(crate) fn voice_models_for(presets: &[ModelPreset], claude_code: bool) -> Vec<ModelRef> {
+    let family_aliases = if claude_code {
+        crate::agent_backend::claude_family_aliases(presets.iter().map(|p| p.model.as_str()))
+    } else {
+        vec![None; presets.len()]
+    };
     let mut models: Vec<ModelRef> = Vec::new();
-    for preset in presets {
+    for (preset, family) in presets.iter().zip(family_aliases) {
         if models.iter().any(|model| model.slug == preset.model) {
             continue;
         }
         let display_name = preset.display_name.trim();
-        let spoken_aliases = if display_name.is_empty() || display_name == preset.model {
+        let mut spoken_aliases = if display_name.is_empty() || display_name == preset.model {
             Vec::new()
         } else {
             vec![display_name.to_string()]
         };
+        if let Some(family) = family
+            && preset.model != family
+        {
+            spoken_aliases.insert(0, family.to_string());
+        }
         models.push(ModelRef {
             slug: preset.model.clone(),
             spoken_aliases,

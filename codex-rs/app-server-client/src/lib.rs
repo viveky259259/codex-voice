@@ -20,6 +20,11 @@
 //! runtime remain bounded; the local consumer event queue is unbounded so
 //! unread notifications cannot prevent request responses from being delivered.
 
+mod agent_backend;
+pub use agent_backend::AgentBackendClient;
+pub use agent_backend::AgentBackendCommand;
+pub use agent_backend::AgentBackendOperation;
+pub use agent_backend::AgentBackendRequestHandle;
 mod cloud;
 pub mod cloud_backend;
 pub use codex_cloud_client::EnvironmentSelection;
@@ -374,12 +379,16 @@ pub struct InProcessAppServerRequestHandle {
 
 #[derive(Clone)]
 pub enum AppServerRequestHandle {
+    /// A non-Codex agent backend, such as Claude Code, behind the app-server protocol.
+    AgentBackend(AgentBackendRequestHandle),
     Cloud(CloudRequestHandle),
     InProcess(InProcessAppServerRequestHandle),
     Remote(crate::remote::RemoteAppServerRequestHandle),
 }
 
 pub enum AppServerClient {
+    /// A non-Codex agent backend, such as Claude Code, behind the app-server protocol.
+    AgentBackend(AgentBackendClient),
     Cloud(CloudClient),
     InProcess(InProcessAppServerClient),
     Remote(RemoteAppServerClient),
@@ -744,7 +753,7 @@ impl AppServerRequestHandle {
                     .start_thread_with_environment(request_id, params, environment)
                     .await
             }
-            Self::InProcess(_) | Self::Remote(_) => Err(IoError::new(
+            Self::AgentBackend(_) | Self::InProcess(_) | Self::Remote(_) => Err(IoError::new(
                 std::io::ErrorKind::Unsupported,
                 "Selecting an environment requires the native Cloud transport.",
             )),
@@ -761,6 +770,7 @@ impl AppServerRequestHandle {
             Self::InProcess(handle) => handle.resolve_server_request(request_id, result).await,
             Self::Remote(handle) => handle.resolve_server_request(request_id, result).await,
             Self::Cloud(handle) => handle.resolve_server_request(request_id, result).await,
+            Self::AgentBackend(handle) => handle.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -773,6 +783,7 @@ impl AppServerRequestHandle {
             Self::InProcess(handle) => handle.reject_server_request(request_id, error).await,
             Self::Remote(handle) => handle.reject_server_request(request_id, error).await,
             Self::Cloud(handle) => handle.reject_server_request(request_id, error).await,
+            Self::AgentBackend(handle) => handle.reject_server_request(request_id, error).await,
         }
     }
 
@@ -781,6 +792,7 @@ impl AppServerRequestHandle {
             Self::InProcess(handle) => handle.request(request).await,
             Self::Remote(handle) => handle.request(request).await,
             Self::Cloud(handle) => handle.request(request).await,
+            Self::AgentBackend(handle) => handle.request(request).await,
         }
     }
 
@@ -801,6 +813,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(_) => Some(std::env::consts::FAMILY),
             Self::Remote(client) => client.platform_family(),
+            Self::AgentBackend(_) => Some(std::env::consts::FAMILY),
             Self::Cloud(_) => None,
         }
     }
@@ -810,6 +823,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(_) => Some(std::env::consts::OS),
             Self::Remote(client) => client.platform_os(),
+            Self::AgentBackend(_) => Some(std::env::consts::OS),
             Self::Cloud(_) => None,
         }
     }
@@ -820,7 +834,7 @@ impl AppServerClient {
                 local_codex_home.display().to_string(),
             )),
             Self::Remote(client) => client.codex_home().map(AppServerPath::from_app_server),
-            Self::Cloud(_) => None,
+            Self::AgentBackend(_) | Self::Cloud(_) => None,
         }
     }
 
@@ -829,6 +843,7 @@ impl AppServerClient {
             Self::InProcess(client) => client.request(request).await,
             Self::Remote(client) => client.request(request).await,
             Self::Cloud(client) => client.request(request).await,
+            Self::AgentBackend(client) => client.request(request).await,
         }
     }
 
@@ -846,6 +861,7 @@ impl AppServerClient {
             Self::InProcess(client) => client.notify(notification).await,
             Self::Remote(client) => client.notify(notification).await,
             Self::Cloud(client) => client.notify(notification).await,
+            Self::AgentBackend(client) => client.notify(notification).await,
         }
     }
 
@@ -858,6 +874,7 @@ impl AppServerClient {
             Self::InProcess(client) => client.resolve_server_request(request_id, result).await,
             Self::Remote(client) => client.resolve_server_request(request_id, result).await,
             Self::Cloud(client) => client.resolve_server_request(request_id, result).await,
+            Self::AgentBackend(client) => client.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -870,6 +887,7 @@ impl AppServerClient {
             Self::InProcess(client) => client.reject_server_request(request_id, error).await,
             Self::Remote(client) => client.reject_server_request(request_id, error).await,
             Self::Cloud(client) => client.reject_server_request(request_id, error).await,
+            Self::AgentBackend(client) => client.reject_server_request(request_id, error).await,
         }
     }
 
@@ -878,6 +896,7 @@ impl AppServerClient {
             Self::InProcess(client) => client.next_event().await.map(Into::into),
             Self::Remote(client) => client.next_event().await,
             Self::Cloud(client) => client.next_event().await,
+            Self::AgentBackend(client) => client.next_event().await,
         }
     }
 
@@ -886,6 +905,7 @@ impl AppServerClient {
             Self::InProcess(client) => client.shutdown().await,
             Self::Remote(client) => client.shutdown().await,
             Self::Cloud(client) => client.shutdown().await,
+            Self::AgentBackend(client) => client.shutdown().await,
         }
     }
 
@@ -894,6 +914,9 @@ impl AppServerClient {
             Self::InProcess(client) => AppServerRequestHandle::InProcess(client.request_handle()),
             Self::Remote(client) => AppServerRequestHandle::Remote(client.request_handle()),
             Self::Cloud(client) => AppServerRequestHandle::Cloud(client.request_handle()),
+            Self::AgentBackend(client) => {
+                AppServerRequestHandle::AgentBackend(client.request_handle())
+            }
         }
     }
 }

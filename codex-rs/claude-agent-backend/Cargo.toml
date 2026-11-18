@@ -1,0 +1,38 @@
+[package]
+name = "codex-claude-agent-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_claude_agent_backend"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-app-server-client = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+codex-protocol = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
+codex-utils-path-uri = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+similar = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -127,6 +127,14 @@ pub(super) async fn run_main_inner(
         }
         _ => None,
     };
+    if cli.agent == crate::cli::AgentKind::ClaudeCode {
+        if explicit_remote_endpoint.is_some() {
+            return Err(std::io::Error::other(
+                "`--agent claude-code` runs Claude Code on this machine; it cannot be combined with --remote",
+            ));
+        }
+        crate::agent_backend::select_claude_code(cli.claude_bin.clone());
+    }
     if let Some(socket_path) = &explicit_local_daemon_socket {
         explicit_remote_endpoint = Some(RemoteAppServerEndpoint::UnixSocket {
             socket_path: socket_path.clone(),
@@ -220,7 +228,9 @@ pub(super) async fn run_main_inner(
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
     );
-    let reuse_implicit_local_daemon = daemon_exclusion.is_none();
+    // A Claude Code session never shares the Codex background server.
+    let reuse_implicit_local_daemon =
+        daemon_exclusion.is_none() && !crate::agent_backend::is_claude_code();
     let search_forces_embedded = cli.web_search
         && daemon_startup::config_exclusion(
             &cli_kv_overrides[..overrides_before_search],

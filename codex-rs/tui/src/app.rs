@@ -308,7 +308,7 @@ mod user_turn_submission;
 mod user_verification;
 mod user_verification_errors;
 mod user_verification_requests;
-mod voice_command_backend;
+pub(crate) mod voice_command_backend;
 mod voice_command_remote;
 mod voice_commands;
 mod voice_owner;

@@ -107,6 +107,7 @@ members = [
     "voice-host",
     "voice-commands",
     "local-voice",
+    "claude-agent-backend",
     "protocol",
     "protocol/tests/support",
     "prompts",
@@ -289,6 +290,7 @@ codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-orchestrator = { path = "orchestrator" }
 codex-local-voice = { path = "local-voice" }
+codex-claude-agent-backend = { path = "claude-agent-backend" }
 codex-otel = { path = "otel" }
 codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }

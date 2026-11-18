@@ -106,6 +106,7 @@ pub(crate) use codex_app_server_client::legacy_core;
 pub(crate) use worktree_startup::ManagedTuiWorktree;
 
 mod activation_key_guard;
+mod agent_backend;
 mod additional_dirs;
 mod analytics;
 mod app;
@@ -515,6 +516,10 @@ async fn start_app_server(
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<AppServerClient> {
+    if let Some(selection) = agent_backend::claude_code() {
+        // Claude Code answers the app-server protocol itself; no Codex server starts.
+        return Ok(agent_backend::start_claude_code(selection, &config));
+    }
     let connection = if matches!(target, AppServerTarget::Embedded) {
         None
     } else {
