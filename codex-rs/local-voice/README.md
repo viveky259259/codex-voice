@@ -86,7 +86,7 @@ device = "0"   # ffmpeg -f avfoundation -i :0 -ac 1 -ar 16000 -f s16le -
 
 [stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo", "--language", "en",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 timeout_ms = 60000
 

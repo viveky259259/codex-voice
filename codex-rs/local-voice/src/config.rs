@@ -110,6 +110,8 @@ impl Default for CommandSttConfig {
                 "{wav}",
                 "--model",
                 "mlx-community/whisper-large-v3-turbo",
+                "--language",
+                "en",
                 "--output-format",
                 "txt",
                 "--output-dir",
@@ -397,6 +399,11 @@ pub struct TranscriptFilterConfig {
     pub short_utterance_ms: u32,
     /// Drop transcripts that are entirely `[...]` or `(...)` annotations.
     pub drop_bracketed: bool,
+    /// Drop transcripts with at least `repeat_min_words` words of which at
+    /// most this fraction are distinct: Whisper loops one phrase on noise
+    /// ("Það er það er það er ..."). 0 disables.
+    pub max_distinct_word_ratio: f32,
+    pub repeat_min_words: usize,
 }
 
 impl Default for TranscriptFilterConfig {
@@ -422,6 +429,8 @@ impl Default for TranscriptFilterConfig {
             ]),
             short_utterance_ms: 600,
             drop_bracketed: true,
+            max_distinct_word_ratio: 0.3,
+            repeat_min_words: 8,
         }
     }
 }

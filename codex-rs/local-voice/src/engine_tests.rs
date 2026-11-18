@@ -17,7 +17,6 @@ use crate::test_support::pcm_bytes;
 use crate::test_support::pid_gone;
 use crate::test_support::read_argv;
 use crate::test_support::speech_burst;
-use crate::test_support::tone;
 use crate::test_support::wait_for;
 use crate::test_support::wait_for_file;
 use crate::test_support::wait_pid_gone;
@@ -257,7 +256,7 @@ async fn audio_while_speaking_is_dropped() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn barge_in_stops_playback_and_starts_an_utterance() {
     let fx = Fixture::new();
-    let mut loud = tone(1000, 9000.0);
+    let mut loud = crate::test_support::voice(1000, 9000.0);
     loud.extend(crate::test_support::silence(1200, 5));
     let raw = fx.write_raw("loud.raw", &loud);
     let mut config = config(

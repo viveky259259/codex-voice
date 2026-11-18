@@ -42,6 +42,13 @@ pub struct VadConfig {
     pub noise_window_ms: u32,
     /// The percentile (0.0..1.0) of the window taken as background.
     pub noise_percentile: f32,
+    /// Speech varies from syllable to syllable; hiss, fans and hum don't.
+    /// When this many milliseconds of an utterance stay within
+    /// `steady_db` (standard deviation of the frame levels, in dB), the
+    /// sound is taken as noise: the floor moves up to it, and an utterance
+    /// that was steady from its start is discarded without transcription.
+    pub steady_window_ms: u32,
+    pub steady_db: f32,
 }
 
 impl Default for VadConfig {
@@ -57,6 +64,8 @@ impl Default for VadConfig {
             min_noise_floor: 60.0,
             noise_window_ms: 4000,
             noise_percentile: 0.1,
+            steady_window_ms: 600,
+            steady_db: 1.5,
         }
     }
 }
@@ -81,6 +90,8 @@ impl Utterance {
 pub enum VadEvent {
     SpeechStarted,
     SpeechEnded(Utterance),
+    /// What started as speech was steady noise; nothing to transcribe.
+    SpeechDiscarded,
 }
 
 #[derive(Debug)]
@@ -108,6 +119,9 @@ pub struct Vad {
     /// Recent frame levels, for the background percentile.
     levels: VecDeque<f32>,
     levels_cap: usize,
+    /// dB levels of the current utterance's most recent frames.
+    recent_db: VecDeque<f32>,
+    steady_frames: usize,
     pending: Vec<i16>,
     pre_roll: VecDeque<i16>,
     pre_roll_len: usize,
@@ -121,6 +135,7 @@ impl Vad {
         let pre_roll_len = ms_to_samples(config.pre_roll_ms);
         let floor = config.min_noise_floor.max(1.0);
         let levels_cap = (config.noise_window_ms / config.frame_ms.max(5)).max(1) as usize;
+        let steady_frames = (config.steady_window_ms / config.frame_ms.max(5)).max(2) as usize;
         Self {
             config,
             frame_len,
@@ -128,6 +143,8 @@ impl Vad {
             calibration: Vec::new(),
             levels: VecDeque::with_capacity(levels_cap),
             levels_cap,
+            recent_db: VecDeque::new(),
+            steady_frames,
             pending: Vec::new(),
             pre_roll: VecDeque::with_capacity(pre_roll_len),
             pre_roll_len,
@@ -162,6 +179,7 @@ impl Vad {
         self.pending.clear();
         self.pre_roll.clear();
         self.current.clear();
+        self.recent_db.clear();
         self.state = State::Idle;
     }
 
@@ -207,6 +225,12 @@ impl Vad {
             "vad frame"
         );
         if self.calibration.len() < CALIBRATION_FRAMES as usize {
+            if level < 1.0 {
+                // Digital silence (a device warming up) says nothing about
+                // the room; calibrate on the first frames with any signal.
+                self.push_pre_roll(frame);
+                return;
+            }
             self.calibration.push(level);
             let mean = self.calibration.iter().sum::<f32>() / self.calibration.len() as f32;
             self.floor = mean.max(self.config.min_noise_floor.max(1.0));
@@ -255,6 +279,22 @@ impl Vad {
             } => {
                 self.current.extend_from_slice(frame);
                 let frames = frames + 1;
+                if let Some(steady_level) = self.note_speech_level(level) {
+                    let since_start = frames as usize;
+                    // Move the floor up to the steady sound: frames at that
+                    // level no longer count as loud, so a later utterance
+                    // must stand out from it.
+                    self.raise_floor(steady_level);
+                    if since_start <= self.steady_frames + min_speech_frames as usize {
+                        tracing::debug!(
+                            level_db = ratio_to_db(steady_level),
+                            "vad: steady sound from the start of the utterance; discarding it as noise"
+                        );
+                        self.discard(events);
+                        return;
+                    }
+                }
+                let keep = self.floor * db_to_ratio(self.config.continue_threshold_db);
                 let (last_loud_frame, silent_frames) = if level >= keep {
                     (frames, 0)
                 } else {
@@ -288,10 +328,54 @@ impl Vad {
         }
     }
 
+    /// Records a frame level of the utterance in progress. Returns the mean
+    /// level when the last `steady_window_ms` stayed within `steady_db`.
+    fn note_speech_level(&mut self, level: f32) -> Option<f32> {
+        if self.recent_db.len() == self.steady_frames {
+            self.recent_db.pop_front();
+        }
+        self.recent_db.push_back(ratio_to_db(level));
+        if self.recent_db.len() < self.steady_frames {
+            return None;
+        }
+        let n = self.recent_db.len() as f32;
+        let mean = self.recent_db.iter().sum::<f32>() / n;
+        let variance = self
+            .recent_db
+            .iter()
+            .map(|db| (db - mean).powi(2))
+            .sum::<f32>()
+            / n;
+        (variance.sqrt() < self.config.steady_db).then(|| {
+            self.recent_db.clear();
+            db_from_dbfs(mean)
+        })
+    }
+
+    fn raise_floor(&mut self, floor: f32) {
+        if floor > self.floor {
+            tracing::debug!(
+                from_db = ratio_to_db(self.floor),
+                to_db = ratio_to_db(floor),
+                "vad: steady sound, raising the floor"
+            );
+            self.floor = floor;
+        }
+    }
+
+    fn discard(&mut self, events: &mut Vec<VadEvent>) {
+        self.current.clear();
+        self.pre_roll.clear();
+        self.recent_db.clear();
+        self.state = State::Idle;
+        events.push(VadEvent::SpeechDiscarded);
+    }
+
     fn finish(&mut self, last_loud_frame: u32, truncated: bool, events: &mut Vec<VadEvent>) {
         let samples = std::mem::take(&mut self.current);
         self.state = State::Idle;
         self.pre_roll.clear();
+        self.recent_db.clear();
         events.push(VadEvent::SpeechEnded(Utterance {
             samples,
             voiced_ms: self.frames_to_ms(last_loud_frame),
@@ -433,6 +517,11 @@ pub fn rms(samples: &[i16]) -> f32 {
         })
         .sum();
     (sum / samples.len() as f64).sqrt() as f32
+}
+
+/// The inverse of [`ratio_to_db`]: dBFS back to an i16-scale RMS level.
+fn db_from_dbfs(db: f32) -> f32 {
+    f32::from(i16::MAX) * 10f32.powf(db / 20.0)
 }
 
 /// An i16-scale RMS level as dBFS, for logs.

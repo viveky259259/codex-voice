@@ -31,6 +31,19 @@ pub(crate) fn tone(ms: u32, amplitude: f32) -> Vec<i16> {
         .collect()
 }
 
+/// Speech-like test signal: a 440 Hz sine whose loudness rises and falls
+/// four times a second, like syllables (amplitude 40%..100%, an 8 dB swing).
+/// A pure `tone` is steady, so the VAD takes long ones as noise.
+pub(crate) fn voice(ms: u32, amplitude: f32) -> Vec<i16> {
+    (0..ms_to_samples(ms))
+        .map(|index| {
+            let t = index as f32 / 16_000.0;
+            let envelope = 0.4 + 0.6 * (0.5 + 0.5 * (2.0 * std::f32::consts::PI * 4.0 * t).sin());
+            (amplitude * envelope * (2.0 * std::f32::consts::PI * 440.0 * t).sin()) as i16
+        })
+        .collect()
+}
+
 pub(crate) fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
     samples
         .iter()
@@ -41,7 +54,7 @@ pub(crate) fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
 /// Leading silence, a one-second tone, then enough silence to end it.
 pub(crate) fn speech_burst() -> Vec<i16> {
     let mut samples = silence(600, 21);
-    samples.extend(tone(1000, 8000.0));
+    samples.extend(voice(1000, 8000.0));
     samples.extend(silence(1200, 22));
     samples
 }
