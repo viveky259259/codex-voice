@@ -30,10 +30,12 @@ show(&outcome.screen);    // one line per agent, recent items, errors
 
 | Item | What it is |
 |---|---|
-| `AgentBackend` | One machine. `machine()`, `list_agents()`, `agent_activity(id)`, `steer(id, message)`, `interrupt(id)`. Methods return `BackendFuture` (a boxed future) so backends can be `Box<dyn AgentBackend>`. |
+| `AgentBackend` | One machine. `machine()`, `link()`, `list_agents()`, `agent_activity(id)`, `steer(id, message)`, `interrupt(id)`. Methods return `BackendFuture` (a boxed future) so backends can be `Box<dyn AgentBackend>`. |
+| `MachineLink` | `link()`'s answer, never blocking: `Local` (the default), or for another machine `Connected`, `Connecting`, `Disconnected` (not tried yet), `Unreachable`. Drives "list my machines"; any non-`Local` machine always confirms steer and stop. |
 | `AgentInfo`, `AgentStatus`, `ActivityItem`, `AgentReport` | Engine-owned copies of the protocol data the engine needs. Each field's doc comment names its `codex-app-server-protocol` v2 source (`Thread.id`, `Thread.status`, `Thread.cwd`, `Turn.started_at`, `ThreadItemPayload::CommandExecution`, ...). The protocol crate is not linked. |
-| `SteerOutcome`, `InterruptOutcome`, `BackendError` | Results of `turn/steer` / `turn/start` and `turn/interrupt`, and backend failures. |
-| `Orchestrator::snapshot()` | Calls `list_agents` on every backend concurrently, each under the timeout (default 3 s, `with_timeout`). A slow or failing machine becomes a `MachineError` entry; the snapshot never fails. |
+| `SteerOutcome`, `InterruptOutcome`, `BackendError` | Results of `turn/steer` / `turn/start` and `turn/interrupt`, and backend failures (`Unreachable`, `Connecting`, `AgentNotFound`, `Request`). |
+| `Orchestrator::snapshot()` | Calls `list_agents` on every backend concurrently, each under the timeout (default 3 s, `with_timeout`). A slow or failing machine becomes a `MachineError` entry (`Timeout`, `Connecting`, `Backend`); the snapshot never fails. |
+| `Orchestrator::machine_links()` | Every backend's machine with its `MachineLink`, then known machines without a backend (`None`). |
 | `Orchestrator::voice_context()` | The `VoiceContext` for the parser: every agent in the last snapshot as an `AgentRef` (`id` = thread id, `machine` = backend machine), the known machines plus every backend's machine, and the known models. |
 | `Orchestrator::parse(transcript, approval_prompt_open)` | `parse_voice_command` plus pronoun resolution (below). |
 | `Orchestrator::execute(command)` | Runs one parsed command and returns an `Outcome { status, spoken, screen, command }`. |
@@ -44,21 +46,28 @@ show(&outcome.screen);    // one line per agent, recent items, errors
 
 | Command | Engine behaviour |
 |---|---|
-| `ListAgents` | Fresh snapshot. Speaks a count, then one line per agent (approvals first) while it fits in 25 words, "Plus N more.", and which machines did not answer. The screen lists every agent with its cwd, and every unreachable machine. |
+| `ListAgents` | Fresh snapshot. Speaks a count, then one line per agent while it fits in 25 words: agents waiting on you (approval, input, error) first, then the rest grouped by machine in backend order; then "Plus N more." and one clause naming the machines that are still connecting or did not answer ("Mac studio is still connecting, nas didn't answer."). The screen lists every agent with its cwd, machine by machine, then `devbox: connecting…` or `nas: unreachable (…)`. |
 | `AgentStatus` | `agent_activity` on that agent's machine. Speaks its line, plus the first words of its last message when idle. The screen adds the cwd and the newest turn's items (command output: last 5 lines only). |
 | `SteerAgent` | Becomes `PendingAction::Steer`; speaks "Tell build on desktop: run the tests. Say confirm." On confirm: `steer`, then "Sent to build on desktop." or, when the backend had to `turn/start`, "Build on desktop was idle, so I started a new turn." |
 | `StopAgent` | If the snapshot already shows the agent idle: "Build on desktop is already idle. Nothing to stop.", with nothing pending. Otherwise `PendingAction::Stop`; on confirm `interrupt`, then "Stopped build on desktop." or the same "already idle" reply if the turn finished meanwhile. |
 | `Ambiguous` | Speaks "Which agent: build on desktop or build on laptop?" and keeps the question; the next utterance goes to `resolve_choice`. |
 | `NotFound` | Speaks "I don't see an agent called deploy." (`Failed`). |
-| `ListMachines` | Answered from the context. |
+| `ListMachines` | "Four machines. Connected: desktop, devbox. Connecting: mac studio. Not connected: laptop." from `machine_links()`; the screen has one line per machine. |
 | `SwitchModel`, `AttachMachine` | `ForCaller`: the engine speaks the acknowledgement; the TUI performs it (voice-commands README, "Mapping commands"). |
 | `None` | `PassThrough`. |
 
 Failures are per command and per machine: a timeout speaks "Laptop didn't
-answer.", a vanished thread "I can't find build on laptop anymore.", and a
-machine without a backend "I'm not connected to server."
+answer.", a machine still connecting "Devbox is still connecting. Try again in
+a moment.", a dead one "I can't reach nas.", a vanished thread "I can't find
+build on laptop anymore.", and a machine without a backend "I'm not connected
+to server."
 
 ### Confirmation
+
+Steer and stop on a machine whose `link()` is not `Local` (or that has no
+backend) always wait for confirmation, even for a command built with
+`needs_confirmation: false`. The question names the machine: "Tell build on
+devbox: run the tests. Say confirm."
 
 Consistent with `is_voice_confirmation` and Lane A's approvals: while an
 action is pending, only a confirmation ("confirm", "yes confirm", "I
@@ -110,26 +119,39 @@ starts a code block or diff.
 
 ## TUI integration
 
-Wired for this machine's app server: `tui/src/app/voice_command_backend.rs`
-(the backend) and `tui/src/app/voice_commands.rs` (one engine on a background
-task, fed in order by `AppEvent::VoiceCommand`). The voice widget decides
-synchronously which transcripts are commands with `parse_with_last_agent` and
+Wired for this machine's app server and the machines in `[realtime]
+voice_machines`: `tui/src/app/voice_command_backend.rs` (the backend),
+`tui/src/app/voice_command_remote.rs` (the SSH link), and
+`tui/src/app/voice_commands.rs` (one engine on a background task, fed in
+order by `AppEvent::VoiceCommand`). The voice widget decides synchronously
+which transcripts are commands with `parse_with_last_agent` and
 `is_cancel_phrase`, mirroring the engine's context, "it" agent, and pending
-state, so ordinary speech never waits on the engine. Remote machines are not
-backends yet: tailnet machines are known names only.
+state, so ordinary speech never waits on the engine. Tailnet / `~/.ssh/config`
+machines that are not configured stay known names only and are never
+contacted.
 
 ### An app-server-backed `AgentBackend`
 
-`AppServerAgentBackend { machine: String, handle: AppServerRequestHandle }`
-in `tui/src/app/voice_orchestrator.rs`. The local machine uses the TUI's own
-app-server client (`AppServerSession::request_handle()`); each remote machine
-uses the handle of a session connected through Lane C's `ssh://` endpoint:
-`codex_app_server_client::resolve_remote_addr("ssh://<host>")` gives
-`RemoteAppServerEndpoint::Ssh`, `RemoteAppServerClient::connect(..)` (as
-`app_server_connection::connect` does for `AppServerTarget::Remote`) connects
-it, and `BackendRegistry::request_handle(owner)` returns its handle once
-registered. Name each backend after its host (`codex_tailnet::Machine::name`),
-or the local hostname.
+`AppServerAgentBackend<T: AppServerTransport> { machine, transport }` in
+`tui/src/app/voice_command_backend.rs`. The request mapping below is written
+once; the transport only sends a `ClientRequest` and returns its JSON-RPC
+result (or `BackendError::Unreachable` / `Connecting`), and reports `link()`.
+
+- This machine: `AppServerRequestHandle` (the TUI's own session,
+  `AppServerSession::request_handle()`), `MachineLink::Local`, named after the
+  local hostname.
+- Each configured machine: `RemoteLink`, which connects
+  `RemoteAppServerClient` with `RemoteAppServerEndpoint::Ssh` (Lane C: `ssh
+  HOST -- codex app-server daemon start`, then `ssh HOST -- codex app-server
+  proxy`), with `required_human_approval: false`. It connects on its own task
+  when voice starts (or on first use), waits at most 1.5 s per call before
+  answering `Connecting` (below the engine's 3 s timeout, so a slow handshake
+  is "connecting", not "down"), keeps the connection, drains its
+  notifications, marks it down on a transport error or disconnect and
+  reconnects on the next call (reporting `Unreachable` with the last error
+  while retrying), and on drop aborts its tasks, which drops the client and
+  kills the ssh child (`kill_on_drop` in Lane C's `SshStdio`). Named by the
+  configured `name`, else the host's first DNS label.
 
 | Method | RPCs (`ClientRequest` variant → method) |
 |---|---|
@@ -172,7 +194,11 @@ engine in place of hand-written command handling:
 
 ## Gaps
 
-- Never run against a real app-server; only the in-memory `FakeBackend`.
+- Tested against fake app servers (in-memory, WebSocket, and over a fake
+  `ssh`), never a real remote host.
+- A remote server's requests to the orchestrator's connection (approvals)
+  are never answered; with `required_human_approval: false` they are not
+  expected to be routed there, but this is unverified.
 - Agents are matched by thread id; two machines with the same thread id
   (forks of one rollout) would confuse `resolve_choice`, which looks agents
   up by id alone.

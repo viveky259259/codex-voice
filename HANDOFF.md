@@ -23,6 +23,22 @@ Development continues in the cloud session; the Mac is the test bench
   `codex-orchestrator`): see "Voice commands" in CODEX-VOICE.md. Run
   `cargo test -p codex-tui --lib -- voice_command`. Not yet tried live.
 
+## Voice orchestration across machines (wip)
+`[realtime] voice_machines = ["devbox", "me@mac-studio"]` makes the TUI's voice
+orchestrator drive agents on those machines over SSH (Lane C's `ssh://`
+endpoint), next to this machine's. `AppServerAgentBackend` is generic over an
+`AppServerTransport` (`tui/src/app/voice_command_backend.rs`); the SSH link
+(`voice_command_remote.rs`) connects in the background when voice starts,
+reports "connecting" until ready, keeps the connection, reconnects after a
+failure, and kills the ssh child on drop. Tested: codex-config parsing,
+orchestrator with fake connecting/dead remotes, the mapping over a fake
+transport, and the real link through a fake `ssh` to a fake app server
+(`cargo test -p codex-tui --lib -- voice_command`). Not yet: a real remote
+host, a live voice session.
+
+Mac checks: add a reachable host to `voice_machines`, start voice, say "what's
+running", "list my machines", then steer and stop an agent there.
+
 ## On wip only (untested)
 - `035f3f0`-equivalent fix commit "Voice approvals: apply each spoken answer
   once" (review findings 1–4). Run the codex-tui realtime/approval/voice tests.
@@ -54,6 +70,7 @@ to clone the v8 Chromium submodule (abseil-cpp) on the Mac; the git CLI works.
 ## Lane status
 | Lane | Where | Status |
 |---|---|---|
+| D: Voice orchestration across machines | `codex-rs/orchestrator/`, `tui/src/app/voice_command*.rs`, `config/src/config_toml.rs` (`voice_machines`) | On `wip`. Fake-ssh integration tests pass in the cloud; real remote host not yet tried. |
 | B: Claude models | `codex-rs/anthropic-proxy/` | Committed. 27 tests pass vs a mock Anthropic server. Not run against the real API. Drafted-but-not-added test that feeds proxy output through `codex_api::spawn_response_stream` (needs dev-deps codex-api, codex-client, codex-protocol, futures). README has config + mapping table. |
 | A: Voice-first TUI | `codex-rs/tui/` (+ `config/src/config_toml.rs`, `core/src/config/*`, `core/config.schema.json`) | Committed. 362 realtime/approval/voice TUI tests pass incl. 30 new (2 failed only on disk-full); codex-config 418 pass. The stack overflows were from not setting `RUST_MIN_STACK=8388608` (upstream always does). `cargo test -p codex-core config` not yet run. |
 | C: Tailscale/SSH remote | `codex-rs/tailnet/`, `codex-rs/app-server-client/` (`ssh.rs`, `remote*.rs`, `tests/ssh_remote.rs`), `codex-rs/cli/` (`remote_cmd.rs`, `remote_cmd_tests.rs`, `tests/remote_ssh.rs`, `main.rs`, `Cargo.toml`), small edits in `tui/src/app/exit_summary.rs`, `tui/src/status/remote_connection.rs` | On `wip` only. Passed: codex-tailnet tests; app-server-client lib 69; `ssh_remote` integration 3 (fake `ssh` → real local app-server). NOT compiled: the `cli/` parts (`codex remote list` / `attach`). Adds `ssh://host` remote endpoint (runs `ssh host -- codex app-server proxy`). |

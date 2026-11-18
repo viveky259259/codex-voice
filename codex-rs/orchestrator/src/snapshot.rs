@@ -62,6 +62,9 @@ pub enum MachineError {
     /// No answer within the per-machine timeout.
     #[error("timed out after {}ms", .after.as_millis())]
     Timeout { after: Duration },
+    /// The connection to the machine is still being set up.
+    #[error("connecting")]
+    Connecting,
     /// The backend returned an error.
     #[error("{message}")]
     Backend { message: String },
@@ -69,8 +72,11 @@ pub enum MachineError {
 
 impl From<BackendError> for MachineError {
     fn from(error: BackendError) -> Self {
-        Self::Backend {
-            message: error.to_string(),
+        match error {
+            BackendError::Connecting => Self::Connecting,
+            error => Self::Backend {
+                message: error.to_string(),
+            },
         }
     }
 }

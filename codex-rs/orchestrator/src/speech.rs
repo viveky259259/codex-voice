@@ -9,6 +9,8 @@ use crate::AgentInfo;
 use crate::AgentReport;
 use crate::AgentStatus;
 use crate::ItemStatus;
+use crate::MachineError;
+use crate::MachineLink;
 use crate::Snapshot;
 use codex_voice_commands::AgentRef;
 use codex_voice_commands::MAX_SPOKEN_WORDS;
@@ -228,6 +230,14 @@ pub fn agent_line(
     format!("{label}: {state}")
 }
 
+/// Agents that wait on the user, or failed, are read before everything else.
+fn needs_user(status: AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::WaitingForApproval | AgentStatus::WaitingForInput | AgentStatus::Error
+    )
+}
+
 /// Agents that need the user come first when read aloud.
 fn speech_priority(status: AgentStatus) -> u8 {
     match status {
@@ -240,23 +250,85 @@ fn speech_priority(status: AgentStatus) -> u8 {
     }
 }
 
+/// "a", "a and b", "a, b and c"; more than three: `None`.
+fn spoken_names(machines: &[&str]) -> Option<String> {
+    let names: Vec<String> = machines.iter().map(|name| spoken_machine(name)).collect();
+    match names.as_slice() {
+        [] => Some(String::new()),
+        [only] => Some(only.clone()),
+        [init @ .., last] if names.len() <= 3 => Some(format!("{} and {last}", init.join(", "))),
+        _ => None,
+    }
+}
+
+/// One clause naming the machines that are not in the list: "Studio didn't
+/// answer.", "Devbox is still connecting.", or "Devbox is still connecting,
+/// studio didn't answer."
+pub(crate) fn missing_machines_clause(connecting: &[&str], unreachable: &[&str]) -> Option<String> {
+    let connecting_part = match connecting.len() {
+        0 => None,
+        1 => Some(format!("{} is still connecting", spoken_names(connecting)?)),
+        count => Some(match spoken_names(connecting) {
+            Some(names) => format!("{names} are still connecting"),
+            None => format!("{} machines are still connecting", count_word(count)),
+        }),
+    };
+    let unreachable_part = match unreachable.len() {
+        0 => None,
+        count => Some(match spoken_names(unreachable) {
+            Some(names) => format!("{names} didn't answer"),
+            None => format!("{} machines didn't answer", count_word(count)),
+        }),
+    };
+    let clause = match (connecting_part, unreachable_part) {
+        (None, None) => return None,
+        (Some(part), None) | (None, Some(part)) => part,
+        (Some(connecting), Some(unreachable)) => format!("{connecting}, {unreachable}"),
+    };
+    Some(sentence(&clause))
+}
+
 /// "Two agents. Tests on laptop: waiting for your approval. Build on
 /// desktop: running cargo test, 2 minutes. Studio didn't answer."
+///
+/// Agents that need the user come first; the rest are grouped by machine in
+/// backend order (this machine first). Machines that did not answer, or are
+/// still connecting, are named in one closing clause.
 pub(crate) fn list_speech(snapshot: &Snapshot, now: i64) -> String {
-    let mut agents: Vec<(&str, &AgentInfo)> = snapshot.agents().collect();
-    agents.sort_by_key(|(_, agent)| speech_priority(agent.status));
-    let failures: Vec<&str> = snapshot.failures().map(|(machine, _)| machine).collect();
-    let failure_note = match failures.as_slice() {
-        [] => None,
-        [machine] => Some(format!(
-            "{} didn't answer.",
-            capitalize(&spoken_machine(machine))
-        )),
-        machines => Some(format!(
-            "{} machines didn't answer.",
-            capitalize(&count_word(machines.len()))
-        )),
-    };
+    let mut agents: Vec<(usize, &str, &AgentInfo)> = snapshot
+        .machines
+        .iter()
+        .enumerate()
+        .flat_map(|(index, machine)| {
+            machine
+                .agents
+                .iter()
+                .flatten()
+                .map(move |agent| (index, machine.machine.as_str(), agent))
+        })
+        .collect();
+    agents.sort_by_key(|(machine_index, _, agent)| {
+        let priority = speech_priority(agent.status);
+        if needs_user(agent.status) {
+            (0, usize::from(priority), 0)
+        } else {
+            (1, *machine_index, priority)
+        }
+    });
+    let agents: Vec<(&str, &AgentInfo)> = agents
+        .into_iter()
+        .map(|(_, machine, agent)| (machine, agent))
+        .collect();
+    let (connecting, unreachable): (Vec<_>, Vec<_>) = snapshot
+        .failures()
+        .partition(|(_, error)| matches!(error, MachineError::Connecting));
+    let connecting: Vec<&str> = connecting.into_iter().map(|(machine, _)| machine).collect();
+    let unreachable: Vec<&str> = unreachable
+        .into_iter()
+        .map(|(machine, _)| machine)
+        .collect();
+    let failure_note = missing_machines_clause(&connecting, &unreachable);
+    let failures = [connecting, unreachable].concat();
     let header = match agents.len() {
         0 if failures.is_empty() => "No agents running.".to_string(),
         0 => "No agents found.".to_string(),
@@ -285,6 +357,83 @@ pub(crate) fn list_speech(snapshot: &Snapshot, now: i64) -> String {
     spoken(&parts.join(" "))
 }
 
+/// "a, b, and two more" with at most three names, read as spoken.
+fn listed_names(machines: &[&str]) -> String {
+    let names: Vec<String> = machines.iter().map(|name| spoken_machine(name)).collect();
+    if names.len() <= 3 {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..3].join(", "),
+        count_word(names.len() - 3)
+    )
+}
+
+/// "Three machines. Connected: desktop, devbox. Connecting: studio. Not
+/// connected: laptop."
+///
+/// `machines` pairs each name with how the engine reaches it, or `None` for a
+/// machine that is only known (discovered, not configured for orchestration).
+pub(crate) fn machines_speech(machines: &[(String, Option<MachineLink>)]) -> String {
+    if machines.is_empty() {
+        return "No machines found.".to_string();
+    }
+    let with = |wanted: fn(Option<MachineLink>) -> bool| -> Vec<&str> {
+        machines
+            .iter()
+            .filter(|(_, link)| wanted(*link))
+            .map(|(name, _)| name.as_str())
+            .collect()
+    };
+    let connected = with(|link| link.is_some_and(MachineLink::is_connected));
+    let connecting = with(|link| link == Some(MachineLink::Connecting));
+    let unreachable = with(|link| {
+        matches!(
+            link,
+            Some(MachineLink::Unreachable | MachineLink::Disconnected)
+        )
+    });
+    let others = with(|link| link.is_none());
+    let mut parts = vec![match machines.len() {
+        1 => "One machine.".to_string(),
+        count => format!("{} machines.", capitalize(&count_word(count))),
+    }];
+    for (label, names) in [
+        ("Connected", connected),
+        ("Connecting", connecting),
+        ("Unreachable", unreachable),
+        ("Not connected", others),
+    ] {
+        if !names.is_empty() {
+            parts.push(format!("{label}: {}.", listed_names(&names)));
+        }
+    }
+    spoken(&parts.join(" "))
+}
+
+/// One line per machine with its orchestration state.
+pub(crate) fn machines_screen(machines: &[(String, Option<MachineLink>)]) -> String {
+    if machines.is_empty() {
+        return "No machines found.".to_string();
+    }
+    machines
+        .iter()
+        .map(|(name, link)| {
+            let state = match link {
+                Some(MachineLink::Local) => "this machine, connected",
+                Some(MachineLink::Connected) => "connected over SSH",
+                Some(MachineLink::Connecting) => "connecting over SSH…",
+                Some(MachineLink::Disconnected) => "not connected yet",
+                Some(MachineLink::Unreachable) => "unreachable; retried on the next command",
+                None => "not connected (add it to [realtime] voice_machines to orchestrate it)",
+            };
+            format!("{name}: {state}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn screen_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default().trim();
     if line.chars().count() <= SCREEN_LINE_CHARS {
@@ -311,11 +460,12 @@ pub(crate) fn list_screen(snapshot: &Snapshot, now: i64) -> String {
     if lines.is_empty() {
         lines.push("No agents.".to_string());
     }
-    lines.extend(
-        snapshot
-            .failures()
-            .map(|(machine, error)| format!("{machine}: unreachable ({error})")),
-    );
+    lines.extend(snapshot.failures().map(|(machine, error)| match error {
+        MachineError::Connecting => format!("{machine}: connecting…"),
+        MachineError::Timeout { .. } | MachineError::Backend { .. } => {
+            format!("{machine}: unreachable ({error})")
+        }
+    }));
     lines.join("\n")
 }
 

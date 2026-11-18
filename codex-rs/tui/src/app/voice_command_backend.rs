@@ -1,7 +1,9 @@
-//! The voice orchestrator's view of this machine's app server.
+//! The voice orchestrator's view of one machine's app server.
 //!
 //! `AppServerAgentBackend` implements `codex_orchestrator::AgentBackend` over
-//! the TUI's app-server request handle, so it can run on a background task:
+//! any [`AppServerTransport`]: this machine's app-server request handle, or a
+//! remote machine's SSH link (`voice_command_remote`). The same requests drive
+//! both, on a background task:
 //! - `list_agents`: `thread/loaded/list`, then `thread/read` per thread, plus
 //!   the newest turn (`thread/turns/list`) of each active one;
 //! - `agent_activity`: `thread/read` and the newest turn with its items;
@@ -12,6 +14,7 @@
 //! functions so it can be tested without a server.
 
 use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_client::RequestResult;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CommandExecutionStatus;
@@ -49,10 +52,12 @@ use codex_orchestrator::BackendError;
 use codex_orchestrator::BackendFuture;
 use codex_orchestrator::InterruptOutcome;
 use codex_orchestrator::ItemStatus;
+use codex_orchestrator::MachineLink;
 use codex_orchestrator::SteerOutcome;
 use codex_protocol::openai_models::ModelPreset;
 use codex_voice_commands::ModelRef;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use uuid::Uuid;
 
 /// Most `thread/loaded/list` pages followed for one listing.
@@ -60,27 +65,54 @@ const MAX_LOADED_LIST_PAGES: usize = 10;
 /// Words of a thread's first message used as its name when it has none.
 const PREVIEW_NAME_WORDS: usize = 4;
 
-/// One machine's agents, read and driven through its app server.
-pub(crate) struct AppServerAgentBackend {
-    machine: String,
-    handle: AppServerRequestHandle,
+/// Sends one app-server request and returns its JSON-RPC result.
+///
+/// The backend's request mapping is the same for every machine; only this
+/// differs. Transport failures are reported as [`BackendError::Unreachable`],
+/// or [`BackendError::Connecting`] while a remote link is still being set up.
+pub(crate) trait AppServerTransport: Send + Sync {
+    fn send(&self, request: ClientRequest) -> BoxFuture<'_, Result<RequestResult, BackendError>>;
+
+    /// How the machine is reached right now. Must not block.
+    fn link(&self) -> MachineLink {
+        MachineLink::Local
+    }
 }
 
-impl AppServerAgentBackend {
-    pub(crate) fn new(machine: String, handle: AppServerRequestHandle) -> Self {
-        Self { machine, handle }
+/// This machine: the TUI's own app-server session.
+impl AppServerTransport for AppServerRequestHandle {
+    fn send(&self, request: ClientRequest) -> BoxFuture<'_, Result<RequestResult, BackendError>> {
+        async move {
+            let method = request.method_name();
+            self.request(request)
+                .await
+                .map_err(|error| BackendError::Unreachable(format!("{method}: {error}")))
+        }
+        .boxed()
+    }
+}
+
+/// One machine's agents, read and driven through its app server.
+pub(crate) struct AppServerAgentBackend<T = AppServerRequestHandle> {
+    machine: String,
+    transport: T,
+}
+
+impl<T: AppServerTransport> AppServerAgentBackend<T> {
+    pub(crate) fn new(machine: String, transport: T) -> Self {
+        Self { machine, transport }
     }
 
-    async fn request<T: serde::de::DeserializeOwned>(
+    async fn request<R: serde::de::DeserializeOwned>(
         &self,
         thread_id: &str,
         request: impl FnOnce(RequestId) -> ClientRequest,
-    ) -> Result<T, BackendError> {
+    ) -> Result<R, BackendError> {
         let request_id = RequestId::String(format!("voice-command-{}", Uuid::new_v4()));
-        self.handle
-            .request_typed(request(request_id))
-            .await
-            .map_err(|error| backend_error(thread_id, error))
+        let request = request(request_id);
+        let method = request.method_name();
+        let result = self.transport.send(request).await?;
+        decode_result(method, result).map_err(|error| backend_error(thread_id, error))
     }
 
     async fn read_thread(&self, id: &str, include_turns: bool) -> Result<Thread, BackendError> {
@@ -166,9 +198,13 @@ impl AppServerAgentBackend {
     }
 }
 
-impl AgentBackend for AppServerAgentBackend {
+impl<T: AppServerTransport> AgentBackend for AppServerAgentBackend<T> {
     fn machine(&self) -> &str {
         &self.machine
+    }
+
+    fn link(&self) -> MachineLink {
+        self.transport.link()
     }
 
     fn list_agents(&self) -> BackendFuture<'_, Vec<AgentInfo>> {
@@ -287,6 +323,22 @@ pub(crate) fn start_params(thread_id: &str, input: Vec<UserInput>) -> TurnStartP
         input,
         ..TurnStartParams::default()
     }
+}
+
+/// A JSON-RPC result decoded into the response type, as
+/// `AppServerRequestHandle::request_typed` does.
+pub(crate) fn decode_result<R: serde::de::DeserializeOwned>(
+    method: &str,
+    result: RequestResult,
+) -> Result<R, TypedRequestError> {
+    let value = result.map_err(|source| TypedRequestError::Server {
+        method: method.to_string(),
+        source,
+    })?;
+    serde_json::from_value(value).map_err(|source| TypedRequestError::Deserialize {
+        method: method.to_string(),
+        source,
+    })
 }
 
 /// Transport failures mean the machine is down; an unknown thread id means

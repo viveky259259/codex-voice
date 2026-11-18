@@ -167,6 +167,10 @@ pub enum BackendError {
     /// The machine could not be reached (connection refused, SSH failure).
     #[error("unreachable: {0}")]
     Unreachable(String),
+    /// The connection to the machine is still being set up (for example an
+    /// SSH handshake in progress). Ask again shortly.
+    #[error("still connecting")]
+    Connecting,
     /// The thread id is unknown on this machine.
     #[error("no agent with id {0}")]
     AgentNotFound(String),

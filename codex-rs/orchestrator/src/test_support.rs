@@ -8,6 +8,7 @@ use crate::AgentStatus;
 use crate::BackendError;
 use crate::BackendFuture;
 use crate::InterruptOutcome;
+use crate::MachineLink;
 use crate::SteerOutcome;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +32,12 @@ pub(crate) enum Behavior {
     WaitFor(Arc<Notify>),
     /// Wakes a [`Behavior::WaitFor`] backend, then answers.
     Signal(Arc<Notify>),
+    /// A remote machine whose SSH connection is still being set up: every
+    /// call fails with [`BackendError::Connecting`].
+    Connecting,
+    /// A remote machine that cannot be reached: every call fails with
+    /// [`BackendError::Unreachable`].
+    Dead(String),
 }
 
 #[derive(Default)]
@@ -43,6 +50,7 @@ pub(crate) struct FakeState {
 pub(crate) struct FakeBackend {
     machine: String,
     behavior: Behavior,
+    link: MachineLink,
     pub(crate) state: Arc<Mutex<FakeState>>,
 }
 
@@ -51,6 +59,7 @@ impl FakeBackend {
         Self {
             machine: machine.to_string(),
             behavior: Behavior::Answer,
+            link: MachineLink::Local,
             state: Arc::new(Mutex::new(FakeState {
                 agents,
                 ..FakeState::default()
@@ -59,8 +68,32 @@ impl FakeBackend {
     }
 
     pub(crate) fn with_behavior(mut self, behavior: Behavior) -> Self {
+        self.link = match (&behavior, self.link) {
+            (Behavior::Connecting, _) => MachineLink::Connecting,
+            (Behavior::Dead(_), _) => MachineLink::Unreachable,
+            (_, link) => link,
+        };
         self.behavior = behavior;
         self
+    }
+
+    /// A machine reached over the network, connected.
+    pub(crate) fn remote(mut self) -> Self {
+        if self.link == MachineLink::Local {
+            self.link = MachineLink::Connected;
+        }
+        self
+    }
+
+    /// Fail like a remote machine that is connecting or down.
+    fn link_error(&self) -> Result<(), BackendError> {
+        match &self.behavior {
+            Behavior::Connecting => Err(BackendError::Connecting),
+            Behavior::Dead(error) => Err(BackendError::Unreachable(error.clone())),
+            Behavior::Answer | Behavior::Hang | Behavior::WaitFor(_) | Behavior::Signal(_) => {
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn with_recent(self, id: &str, recent: Vec<ActivityItem>) -> Self {
@@ -109,6 +142,10 @@ impl AgentBackend for FakeBackend {
         &self.machine
     }
 
+    fn link(&self) -> MachineLink {
+        self.link
+    }
+
     fn list_agents(&self) -> BackendFuture<'_, Vec<AgentInfo>> {
         Box::pin(async move {
             match &self.behavior {
@@ -116,6 +153,7 @@ impl AgentBackend for FakeBackend {
                 Behavior::Hang => std::future::pending::<()>().await,
                 Behavior::WaitFor(notify) => notify.notified().await,
                 Behavior::Signal(notify) => notify.notify_one(),
+                Behavior::Connecting | Behavior::Dead(_) => self.link_error()?,
             }
             Ok(self.state.lock().unwrap().agents.clone())
         })
@@ -123,6 +161,7 @@ impl AgentBackend for FakeBackend {
 
     fn agent_activity<'a>(&'a self, id: &'a str) -> BackendFuture<'a, AgentReport> {
         Box::pin(async move {
+            self.link_error()?;
             let agent = self.agent(id)?;
             let recent = self
                 .state
@@ -138,6 +177,7 @@ impl AgentBackend for FakeBackend {
 
     fn steer<'a>(&'a self, id: &'a str, message: &'a str) -> BackendFuture<'a, SteerOutcome> {
         Box::pin(async move {
+            self.link_error()?;
             let agent = self.agent(id)?;
             self.state.lock().unwrap().calls.push(Call::Steer {
                 id: id.to_string(),
@@ -158,6 +198,7 @@ impl AgentBackend for FakeBackend {
 
     fn interrupt<'a>(&'a self, id: &'a str) -> BackendFuture<'a, InterruptOutcome> {
         Box::pin(async move {
+            self.link_error()?;
             let agent = self.agent(id)?;
             self.state
                 .lock()

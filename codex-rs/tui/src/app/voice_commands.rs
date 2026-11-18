@@ -7,16 +7,27 @@
 //! `AppEvent::VoiceCommandResult` and is spoken by the voice widget. Model
 //! switches go through the `/model` picker's apply event. Attaching to another
 //! machine is not done at runtime yet: the answer says which command to run.
+//!
+//! Besides this machine, the orchestrator drives every machine listed in
+//! `[realtime] voice_machines`, over SSH (`voice_command_remote`). Their
+//! connections start in the background when the orchestrator starts (the
+//! first voice command or voice start), so a slow SSH handshake is reported
+//! as "connecting" instead of holding up this machine's answers.
 
 use super::App;
 use super::voice_command_backend::AppServerAgentBackend;
 use super::voice_command_backend::local_machine_name;
 use super::voice_command_backend::voice_models;
+use super::voice_command_remote::VoiceMachineTarget;
+use super::voice_command_remote::remote_backends;
+use super::voice_command_remote::resolve_voice_machines;
 use crate::app_event::AppEvent;
 use crate::app_event::VoiceCommandResult;
 use crate::app_event_sender::AppEventSender;
 use crate::app_server_session::AppServerSession;
 use crate::backend_id::BackendId;
+use codex_config::config_toml::VoiceMachine;
+use codex_orchestrator::AgentBackend;
 use codex_orchestrator::Orchestrator;
 use codex_orchestrator::OutcomeStatus;
 use codex_protocol::ThreadId;
@@ -76,6 +87,7 @@ impl VoiceCommandRunner {
         &mut self,
         app_server: &AppServerSession,
         app_event_tx: &AppEventSender,
+        voice_machines: &[VoiceMachine],
         job: QueuedJob,
     ) {
         let backend_id = app_server.backend_id();
@@ -84,12 +96,16 @@ impl VoiceCommandRunner {
             .as_ref()
             .is_some_and(|(owner, jobs)| *owner == backend_id && !jobs.is_closed());
         if !running {
-            let backend =
-                AppServerAgentBackend::new(local_machine_name(), app_server.request_handle());
-            let engine = Orchestrator::new(vec![Box::new(backend)]);
+            let local_machine = local_machine_name();
+            let (remotes, warnings) = resolve_voice_machines(voice_machines, &local_machine);
+            for warning in warnings {
+                tracing::warn!("{warning}");
+            }
+            let backend = AppServerAgentBackend::new(local_machine, app_server.request_handle());
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
             tokio::spawn(run_orchestrator(
-                engine,
+                Box::new(backend),
+                remotes,
                 self.machine_discovery.clone(),
                 jobs_rx,
                 app_event_tx.clone(),
@@ -145,12 +161,29 @@ fn pass_through_reply(transcript: &str) -> &'static str {
     }
 }
 
+/// The engine for this machine plus the configured remote machines, whose
+/// SSH connections start now, in the background.
+pub(crate) fn orchestrator_for(
+    local: Box<dyn AgentBackend>,
+    remotes: Vec<VoiceMachineTarget>,
+) -> Orchestrator {
+    let mut backends = vec![local];
+    backends.extend(
+        remote_backends(remotes)
+            .into_iter()
+            .map(|backend| Box::new(backend) as Box<dyn AgentBackend>),
+    );
+    Orchestrator::new(backends)
+}
+
 async fn run_orchestrator(
-    mut engine: Orchestrator,
+    local: Box<dyn AgentBackend>,
+    remotes: Vec<VoiceMachineTarget>,
     discovery: MachineDiscovery,
     mut jobs: mpsc::UnboundedReceiver<QueuedJob>,
     app_event_tx: AppEventSender,
 ) {
+    let mut engine = orchestrator_for(local, remotes);
     engine.set_known_machines(discover_machines(discovery).await);
     while let Some(QueuedJob {
         thread_id,
@@ -209,6 +242,7 @@ impl App {
         self.voice_commands.submit(
             app_server,
             &self.app_event_tx,
+            &self.config.realtime.voice_machines,
             QueuedJob {
                 thread_id,
                 seq,

@@ -703,6 +703,71 @@ pub struct RealtimeConfig {
     /// build to run the tests", "switch to opus") during a voice conversation.
     #[serde(default = "default_realtime_voice_commands")]
     pub voice_commands: bool,
+    /// Other machines whose agents voice commands list, read, steer, and stop,
+    /// over SSH. Only these machines are ever contacted.
+    #[serde(default)]
+    pub voice_machines: Vec<VoiceMachine>,
+}
+
+/// A machine voice commands may drive over SSH, from `[realtime]
+/// voice_machines`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+pub struct VoiceMachine {
+    /// Any destination `codex remote attach` accepts: an `~/.ssh/config`
+    /// alias, a tailnet or DNS name, an IP, `user@host`, or
+    /// `ssh://user@host:port`.
+    pub host: String,
+    /// The name used in speech ("build on devbox"). Defaults to the host
+    /// without its user, port, or domain.
+    pub name: Option<String>,
+    /// Codex executable on that machine. Defaults to `CODEX_REMOTE_BIN`, then
+    /// `codex` on the remote `PATH`.
+    pub codex_bin: Option<String>,
+}
+
+impl From<VoiceMachineToml> for VoiceMachine {
+    fn from(machine: VoiceMachineToml) -> Self {
+        match machine {
+            VoiceMachineToml::Host(host) => Self {
+                host,
+                name: None,
+                codex_bin: None,
+            },
+            VoiceMachineToml::Table(VoiceMachineTableToml {
+                host,
+                name,
+                codex_bin,
+            }) => Self {
+                host,
+                name,
+                codex_bin,
+            },
+        }
+    }
+}
+
+/// One `[realtime] voice_machines` entry: a destination string, or a table
+/// that also names the machine or its remote Codex binary.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(untagged)]
+pub enum VoiceMachineToml {
+    /// `"devbox"`, `"me@mac-studio"`, or `"ssh://me@devbox:2222"`.
+    Host(String),
+    /// `{ host = "me@devbox", name = "devbox", codex_bin = "/opt/codex/bin/codex" }`.
+    Table(VoiceMachineTableToml),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct VoiceMachineTableToml {
+    /// Any destination `codex remote attach` accepts.
+    pub host: String,
+    /// The name used in speech. Defaults to the host without its user, port,
+    /// or domain.
+    pub name: Option<String>,
+    /// Codex executable on that machine (default: `codex` on its `PATH`).
+    pub codex_bin: Option<String>,
 }
 
 fn default_realtime_voice_commands() -> bool {
@@ -718,6 +783,7 @@ impl Default for RealtimeConfig {
             voice: None,
             auto_start: false,
             voice_commands: default_realtime_voice_commands(),
+            voice_machines: Vec::new(),
         }
     }
 }
@@ -737,6 +803,12 @@ pub struct RealtimeToml {
     /// list, check, steer, and stop agents, and switch models. Defaults to
     /// `true`; set `false` to send every utterance to the model.
     pub voice_commands: Option<bool>,
+    /// Other machines whose agents voice commands may list, read, steer, and
+    /// stop, over SSH (`ssh HOST -- codex app-server proxy`). Opt-in: machines
+    /// found by `codex remote list` are never contacted unless listed here.
+    /// Each entry is a destination `codex remote attach` accepts, or a table
+    /// `{ host, name, codex_bin }`.
+    pub voice_machines: Option<Vec<VoiceMachineToml>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1167,6 +1239,94 @@ mod tests {
             })
         );
         assert!(RealtimeConfig::default().voice_commands);
+    }
+
+    #[test]
+    fn realtime_voice_machines_parse_strings_and_tables() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[realtime]
+voice_machines = [
+  "devbox",
+  "me@mac-studio",
+  { host = "ssh://me@10.0.0.7:2222", name = "nas", codex_bin = "/opt/codex/bin/codex" },
+  { host = "laptop" },
+]
+"#,
+        )
+        .expect("realtime voice_machines should deserialize");
+        let machines = config
+            .realtime
+            .and_then(|realtime| realtime.voice_machines)
+            .expect("voice_machines");
+        assert_eq!(
+            machines,
+            vec![
+                VoiceMachineToml::Host("devbox".to_string()),
+                VoiceMachineToml::Host("me@mac-studio".to_string()),
+                VoiceMachineToml::Table(VoiceMachineTableToml {
+                    host: "ssh://me@10.0.0.7:2222".to_string(),
+                    name: Some("nas".to_string()),
+                    codex_bin: Some("/opt/codex/bin/codex".to_string()),
+                }),
+                VoiceMachineToml::Table(VoiceMachineTableToml {
+                    host: "laptop".to_string(),
+                    name: None,
+                    codex_bin: None,
+                }),
+            ]
+        );
+        assert_eq!(
+            machines
+                .into_iter()
+                .map(VoiceMachine::from)
+                .collect::<Vec<_>>(),
+            vec![
+                VoiceMachine {
+                    host: "devbox".to_string(),
+                    name: None,
+                    codex_bin: None,
+                },
+                VoiceMachine {
+                    host: "me@mac-studio".to_string(),
+                    name: None,
+                    codex_bin: None,
+                },
+                VoiceMachine {
+                    host: "ssh://me@10.0.0.7:2222".to_string(),
+                    name: Some("nas".to_string()),
+                    codex_bin: Some("/opt/codex/bin/codex".to_string()),
+                },
+                VoiceMachine {
+                    host: "laptop".to_string(),
+                    name: None,
+                    codex_bin: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn realtime_voice_machines_default_to_none_and_reject_unknown_keys() {
+        let config: ConfigToml =
+            toml::from_str("[realtime]\nauto_start = true\n").expect("realtime should deserialize");
+        assert_eq!(
+            config.realtime.and_then(|realtime| realtime.voice_machines),
+            None
+        );
+        assert_eq!(RealtimeConfig::default().voice_machines, Vec::new());
+
+        for invalid in [
+            "[realtime]\nvoice_machines = [{ host = \"devbox\", port = 22 }]\n",
+            "[realtime]\nvoice_machines = [{ name = \"devbox\" }]\n",
+            "[realtime]\nvoice_machines = \"devbox\"\n",
+            "[realtime]\nvoice_machines = [22]\n",
+        ] {
+            assert!(
+                toml::from_str::<ConfigToml>(invalid).is_err(),
+                "should reject {invalid:?}"
+            );
+        }
     }
 
     #[test]

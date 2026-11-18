@@ -4852,6 +4852,12 @@ impl Config {
                         voice_commands: realtime
                             .voice_commands
                             .unwrap_or(defaults.voice_commands),
+                        voice_machines: realtime
+                            .voice_machines
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
                     }
                 }),
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,

@@ -178,6 +178,13 @@ pub(crate) fn failed(agent: &AgentRef, error: CallError, command: VoiceCommand) 
         CallError::Backend(BackendError::AgentNotFound(_)) => {
             (format!("I can't find {label} anymore."), error_text(&error))
         }
+        CallError::Backend(BackendError::Connecting) => (
+            format!(
+                "{} is still connecting. Try again in a moment.",
+                capitalize(&machine_name)
+            ),
+            "still connecting".to_string(),
+        ),
         CallError::Backend(BackendError::Unreachable(_)) => {
             (format!("I can't reach {machine_name}."), error_text(&error))
         }
