@@ -48,6 +48,12 @@ pub(crate) async fn check_directory_trust(
     } = options;
     let connected = !matches!(target, AppServerTarget::Embedded);
     let mut consent = OnboardingResult::default();
+    // Folder trust is Codex config, which Claude Code sessions neither read nor
+    // write (config/read and config/batchWrite are not served). The `claude`
+    // CLI applies its own folder trust.
+    if crate::agent_backend::is_claude_code() {
+        return Ok(consent);
+    }
     // Another client can load the saved task while consent is pending. Check both folders.
     let saved_cwd = resumed_thread
         .filter(|thread| {
