@@ -12,7 +12,9 @@
 //! `[realtime] voice_machines`, over SSH (`voice_command_remote`). Their
 //! connections start in the background when the orchestrator starts (the
 //! first voice command or voice start), so a slow SSH handshake is reported
-//! as "connecting" instead of holding up this machine's answers.
+//! as "connecting" instead of holding up this machine's answers. Those links
+//! also bring the remote agents' approval requests into this TUI's approval
+//! overlay (`voice_remote_approvals`).
 
 use super::App;
 use super::voice_command_backend::AppServerAgentBackend;
@@ -21,6 +23,7 @@ use super::voice_command_backend::voice_models;
 use super::voice_command_remote::VoiceMachineTarget;
 use super::voice_command_remote::remote_backends;
 use super::voice_command_remote::resolve_voice_machines;
+use super::voice_remote_approvals::RemoteApprovals;
 use crate::app_event::AppEvent;
 use crate::app_event::VoiceCommandResult;
 use crate::app_event_sender::AppEventSender;
@@ -78,6 +81,8 @@ struct QueuedJob {
 pub(crate) struct VoiceCommandRunner {
     jobs: Option<(BackendId, mpsc::UnboundedSender<QueuedJob>)>,
     pub(crate) machine_discovery: MachineDiscovery,
+    /// Approval requests from agents on the configured remote machines.
+    pub(crate) remote_approvals: RemoteApprovals,
 }
 
 impl VoiceCommandRunner {
@@ -162,14 +167,16 @@ fn pass_through_reply(transcript: &str) -> &'static str {
 }
 
 /// The engine for this machine plus the configured remote machines, whose
-/// SSH connections start now, in the background.
+/// SSH connections start now, in the background. With `approvals`, the remote
+/// machines' approval requests are forwarded there.
 pub(crate) fn orchestrator_for(
     local: Box<dyn AgentBackend>,
     remotes: Vec<VoiceMachineTarget>,
+    approvals: Option<&AppEventSender>,
 ) -> Orchestrator {
     let mut backends = vec![local];
     backends.extend(
-        remote_backends(remotes)
+        remote_backends(remotes, approvals)
             .into_iter()
             .map(|backend| Box::new(backend) as Box<dyn AgentBackend>),
     );
@@ -183,7 +190,7 @@ async fn run_orchestrator(
     mut jobs: mpsc::UnboundedReceiver<QueuedJob>,
     app_event_tx: AppEventSender,
 ) {
-    let mut engine = orchestrator_for(local, remotes);
+    let mut engine = orchestrator_for(local, remotes, Some(&app_event_tx));
     engine.set_known_machines(discover_machines(discovery).await);
     while let Some(QueuedJob {
         thread_id,

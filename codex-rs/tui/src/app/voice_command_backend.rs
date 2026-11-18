@@ -77,6 +77,11 @@ pub(crate) trait AppServerTransport: Send + Sync {
     fn link(&self) -> MachineLink {
         MachineLink::Local
     }
+
+    /// Listen for approval requests from these agents, after a snapshot
+    /// listed them. Must not block. This machine's threads already reach the
+    /// TUI's own approval flow, so the default does nothing.
+    fn watch_threads(&self, _agents: &[AgentInfo]) {}
 }
 
 /// This machine: the TUI's own app-server session.
@@ -215,6 +220,7 @@ impl<T: AppServerTransport> AgentBackend for AppServerAgentBackend<T> {
             for agent in agents {
                 found.extend(agent?);
             }
+            self.transport.watch_threads(&found);
             Ok(found)
         }
         .boxed()

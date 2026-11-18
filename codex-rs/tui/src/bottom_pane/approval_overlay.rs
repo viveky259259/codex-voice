@@ -69,6 +69,32 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
+/// Separates machine and agent in the thread label of a request from an agent
+/// on another machine ("devbox · build").
+pub(crate) const REMOTE_LABEL_SEPARATOR: &str = " · ";
+
+/// The thread label of a request from `agent` on `machine`.
+pub(crate) fn remote_thread_label(machine: &str, agent: &str) -> String {
+    format!("{machine}{REMOTE_LABEL_SEPARATOR}{agent}")
+}
+
+/// The [`ApprovalRequest::voice_key`] of the prompt a resolution dismisses.
+pub(crate) fn resolved_voice_key(request: &ResolvedAppServerRequest) -> Option<String> {
+    match request {
+        ResolvedAppServerRequest::ExecApproval { thread_id, id } => {
+            Some(format!("exec:{thread_id}:{id}"))
+        }
+        ResolvedAppServerRequest::PermissionsApproval { thread_id, id } => {
+            Some(format!("permissions:{thread_id}:{id}"))
+        }
+        ResolvedAppServerRequest::FileChangeApproval { thread_id, id } => {
+            Some(format!("patch:{thread_id}:{id}"))
+        }
+        ResolvedAppServerRequest::UserInput { .. }
+        | ResolvedAppServerRequest::McpElicitation { .. } => None,
+    }
+}
+
 /// Request coming from the agent that needs user approval.
 #[derive(Clone, Debug)]
 pub(crate) enum ApprovalRequest {
@@ -135,7 +161,7 @@ impl ApprovalRequest {
         }
     }
 
-    pub(super) fn thread_id(&self) -> ThreadId {
+    pub(crate) fn thread_id(&self) -> ThreadId {
         match self {
             ApprovalRequest::Exec(request) => request.thread_id,
             ApprovalRequest::Permissions(request) => request.thread_id,
@@ -151,6 +177,14 @@ impl ApprovalRequest {
             ApprovalRequest::ApplyPatch(request) => request.thread_label.as_deref(),
             ApprovalRequest::McpElicitation(request) => request.thread_label.as_deref(),
         }
+    }
+
+    /// The machine and agent of a request from another machine, read from its
+    /// `"<machine> · <agent>"` thread label. `None` for this machine's requests.
+    pub(crate) fn remote_origin(&self) -> Option<(&str, &str)> {
+        self.thread_label()?
+            .split_once(REMOTE_LABEL_SEPARATOR)
+            .filter(|(machine, agent)| !machine.is_empty() && !agent.is_empty())
     }
 
     /// Stable identity used to tie a spoken confirmation to one prompt.

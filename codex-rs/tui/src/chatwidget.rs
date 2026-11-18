@@ -379,6 +379,10 @@ pub(crate) use realtime::tests::activate_voice_for_thread;
 #[cfg(test)]
 pub(crate) use realtime::tests::commit_realtime_history_events;
 #[cfg(test)]
+pub(crate) use realtime::tests::say_for_test;
+#[cfg(test)]
+pub(crate) use realtime::tests::visible_approval_for_test;
+#[cfg(test)]
 pub(crate) use realtime::tests::start_voice_attempt_for_test;
 mod reasoning_shortcuts;
 use self::realtime::RealtimeConversationUiState;
@@ -1068,9 +1072,23 @@ impl ChatWidget {
                 .is_some_and(|thread_id| thread_id.to_string() == request_thread_id)
         }) && self.interrupts.remove_resolved_prompt(request);
         let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
+        let visible_before = self
+            .bottom_pane
+            .current_approval_request()
+            .map(crate::bottom_pane::ApprovalRequest::voice_key);
         let removed_visible = self.bottom_pane.dismiss_app_server_request(request);
+        // A half-finished spoken approval of this prompt must not survive it.
+        self.forget_voice_approval_of(request);
         if removed_visible && had_modal_or_popup && self.bottom_pane.no_modal_or_popup_active() {
             self.on_modal_or_popup_closed();
+        }
+        let visible_after = self
+            .bottom_pane
+            .current_approval_request()
+            .map(crate::bottom_pane::ApprovalRequest::voice_key);
+        if removed_visible && visible_after.is_some() && visible_after != visible_before {
+            // The next queued prompt is now visible: say it, as after an answer.
+            self.announce_realtime_approval_request();
         }
         if removed_deferred || removed_visible {
             self.request_redraw();

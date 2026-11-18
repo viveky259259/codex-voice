@@ -20,8 +20,10 @@ use super::voice_approval::approval_request_prompt;
 use super::voice_approval::limit_words;
 use super::voice_approval::parse_voice_approval_intent;
 use super::voice_approval::turn_error_speech;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_command::AppCommand;
 use crate::bottom_pane::VoiceApprovalDecision;
+use crate::bottom_pane::resolved_voice_key;
 use codex_config::config_toml::RealtimeWsMode;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -219,6 +221,34 @@ impl ChatWidget {
         // A new prompt never inherits a half-finished voice approval.
         self.realtime_conversation.voice_controls.voice_approval = None;
         self.speak_realtime_status(&prompt);
+    }
+
+    /// Drop a half-finished spoken approval ("approve" said, "confirm" not yet)
+    /// of a prompt that was answered elsewhere or withdrawn.
+    pub(in crate::chatwidget) fn forget_voice_approval_of(
+        &mut self,
+        request: &ResolvedAppServerRequest,
+    ) {
+        let Some(key) = resolved_voice_key(request) else {
+            return;
+        };
+        let voice_controls = &mut self.realtime_conversation.voice_controls;
+        if voice_controls
+            .voice_approval
+            .as_ref()
+            .is_some_and(|pending| pending.request_key == key)
+        {
+            voice_controls.voice_approval = None;
+        }
+    }
+
+    /// Show a note about approvals on another machine, and say it during a
+    /// voice conversation ("Couldn't reach devbox; the approval is still
+    /// waiting there.").
+    pub(crate) fn notify_remote_approval_status(&mut self, text: &str) {
+        self.add_info_message(text.to_string(), /*hint*/ None);
+        self.speak_realtime_status(text);
+        self.request_redraw();
     }
 
     /// Summarize a failed turn aloud in one short sentence.

@@ -595,6 +595,7 @@ async fn voice_commands_span_this_machine_and_remote_ones() -> Result<()> {
                 target: nas,
             },
         ],
+        /*approvals*/ None,
     )
     // Generous for slow CI: the fake ssh starts python for every connection.
     .with_timeout(std::time::Duration::from_secs(10))
