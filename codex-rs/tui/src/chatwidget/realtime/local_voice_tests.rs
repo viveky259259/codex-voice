@@ -78,6 +78,10 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_on(ThreadId::new()).await
+    }
+
+    async fn start_on(thread_id: ThreadId) -> Self {
         let (mut chat, _sender, events, ops) = make_chatwidget_manual_with_sender().await;
         let engine = Arc::new(FakeEngine::default());
         let (voice_events, receiver) = mpsc::channel(16);
@@ -95,7 +99,6 @@ impl Harness {
         // Local voice never asks for the packaged voice host.
         set_realtime_voice_supported_for_test(Some(false));
         chat.set_realtime_backend_for_test(RealtimeBackend::Local);
-        let thread_id = ThreadId::new();
         chat.thread_id = Some(thread_id);
         chat.toggle_realtime_conversation();
         assert!(chat.local_voice_running(), "local voice should start");
@@ -320,6 +323,89 @@ async fn voice_turn_answer_is_spoken_short_without_code() {
         ]
     );
     assert_eq!(h.drain().realtime_speech(), 0);
+}
+
+/// A Claude Code session: the backend (driving a fake `claude`, python3 -I)
+/// produces the turn's notifications, and the spoken answer comes from the
+/// final agent message its `turn/completed` carries.
+#[tokio::test]
+async fn claude_code_voice_turn_answer_is_spoken() {
+    use codex_app_server_client::AppServerEvent;
+    use codex_app_server_protocol::ClientRequest;
+    use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::ThreadStartResponse;
+    use codex_app_server_protocol::TurnStartParams;
+    use codex_app_server_protocol::TurnStartResponse;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let Some(script) = codex_claude_agent_backend::test_support::write_fake_claude(dir.path())
+    else {
+        eprintln!("python3 not found; skipping");
+        return;
+    };
+    let mut options = codex_claude_agent_backend::ClaudeCodeOptions::new(dir.path().to_path_buf());
+    options.claude_bin = script;
+    options.env = vec![
+        (
+            "FAKE_CLAUDE_LOG".into(),
+            dir.path().join("log.jsonl").into(),
+        ),
+        ("FAKE_CLAUDE_SCENARIO".into(), "text".into()),
+    ];
+    let mut client = codex_claude_agent_backend::start(options);
+    let started: ThreadStartResponse = client
+        .request_typed(ClientRequest::ThreadStart {
+            request_id: RequestId::Integer(1),
+            params: Default::default(),
+        })
+        .await
+        .expect("thread/start");
+    let thread_id = ThreadId::from_string(&started.thread.id).expect("thread id");
+    let mut h = Harness::start_on(thread_id).await;
+
+    let spoken_request = "list the files in this folder";
+    h.say(spoken_request);
+    assert_eq!(h.drain().user_turns(), vec![spoken_request]);
+    // The App submits that user turn to the backend as turn/start.
+    let _: TurnStartResponse = client
+        .request_typed(ClientRequest::TurnStart {
+            request_id: RequestId::Integer(2),
+            params: TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: spoken_request.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("turn/start");
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), client.next_event())
+            .await
+            .expect("an event within 10s")
+            .expect("backend open");
+        let AppServerEvent::ServerNotification(notification) = event else {
+            continue;
+        };
+        let done = matches!(*notification, ServerNotification::TurnCompleted(_));
+        h.chat
+            .handle_server_notification(*notification, /*replay_kind*/ None);
+        if done {
+            break;
+        }
+    }
+
+    assert_eq!(
+        h.engine.take_spoken(),
+        vec!["Hello from Claude.".to_string()]
+    );
+    assert!(
+        h.drain().history_text().contains("Hello from Claude."),
+        "the answer is also on screen"
+    );
+    client.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]

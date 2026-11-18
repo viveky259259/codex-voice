@@ -1037,3 +1037,32 @@ async fn failed_thread_title_requests_are_removed() -> color_eyre::Result<()> {
     app_server.shutdown().await?;
     Ok(())
 }
+
+#[test]
+fn voice_fallback_titles_break_at_a_word_with_an_ellipsis() {
+    use super::fallback_thread_title;
+    use super::truncate_at_word;
+    assert_eq!(
+        truncate_at_word("List the files in this folder", 40),
+        "List the files in this folder"
+    );
+    assert_eq!(
+        truncate_at_word("Refactor the parser so empty input no longer panics", 40),
+        "Refactor the parser so empty input no…"
+    );
+    assert_eq!(truncate_at_word("one, two, three", 11), "one, two…");
+    assert_eq!(truncate_at_word("supercalifragilistic", 6), "super…");
+    assert_eq!(
+        fallback_thread_title(
+            "Please look through the whole repository and list every file that mentions the parser"
+        )
+        .as_deref(),
+        Some("Please look through the whole repository and list every…")
+    );
+    for title in [
+        truncate_at_word("Refactor the parser so empty input no longer panics", 40),
+        fallback_thread_title(&"word ".repeat(40)).expect("title"),
+    ] {
+        assert!(!title.contains("  "), "{title}");
+    }
+}

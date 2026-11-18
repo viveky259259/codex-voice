@@ -762,7 +762,12 @@ impl AppServerSession {
         if self.thread_params_mode == ThreadParamsMode::Cloud {
             return Ok(());
         }
-        let worktrees = if !self.uses_remote_workspace() && !config.active_project.is_untrusted() {
+        // Claude Code sessions have no Codex thread attachments (nor its
+        // managed worktree tools); skip the probe rather than log its refusal.
+        let worktrees = if !self.uses_remote_workspace()
+            && !config.active_project.is_untrusted()
+            && !crate::agent_backend::is_claude_code()
+        {
             // Listing a fresh, nonexistent thread is read-only and returns an empty page
             // on supported stores. Probe before advertising tools or allocating a checkout.
             let support = self

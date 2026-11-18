@@ -242,3 +242,28 @@ fn result_usage_and_errors() {
         Some("API Error: 401".to_string())
     );
 }
+
+#[test]
+fn the_last_text_block_is_the_turns_answer() {
+    let mut mapper = mapper();
+    assert_eq!(mapper.last_agent_message(), None);
+    feed(
+        &mut mapper,
+        &[
+            json!({"type": "assistant", "parent_tool_use_id": null, "message": {"id": "m1", "content": [
+                {"type": "text", "text": "Let me look."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},
+            ]}}),
+            json!({"type": "assistant", "parent_tool_use_id": null, "message": {"id": "m2", "content": [
+                {"type": "thinking", "thinking": "Done looking."},
+                {"type": "text", "text": "There are two files."},
+            ]}}),
+        ],
+    );
+    let answer = mapper.last_agent_message().expect("an answer");
+    assert_eq!(
+        item_label(&answer.payload),
+        "agentMessage m2:text:0 \"There are two files.\""
+    );
+    assert_eq!(answer.completed_at_ms, Some(5));
+}

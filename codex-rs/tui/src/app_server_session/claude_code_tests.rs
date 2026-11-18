@@ -32,7 +32,10 @@ impl Fake {
         let mut options = crate::agent_backend::claude_code_options(&selection, &config);
         options.cwd = dir.path().to_path_buf();
         options.env = vec![
-            ("FAKE_CLAUDE_LOG".into(), dir.path().join("log.jsonl").into()),
+            (
+                "FAKE_CLAUDE_LOG".into(),
+                dir.path().join("log.jsonl").into(),
+            ),
             ("FAKE_CLAUDE_SCENARIO".into(), "text".into()),
         ];
         let session = AppServerSession::new(
@@ -124,7 +127,11 @@ async fn bootstrap_lists_claude_models_and_voice_and_model_picker_switch_with_se
     );
     assert_eq!(bootstrap.default_model.as_deref(), Some("default"));
 
-    let started = fake.session.start_thread(&config).await.expect("thread/start");
+    let started = fake
+        .session
+        .start_thread(&config)
+        .await
+        .expect("thread/start");
     assert_eq!(started.session.model, "default");
     assert_eq!(started.session.model_provider_id, "claude-code");
     let thread_id = started.session.thread_id;
@@ -152,7 +159,10 @@ async fn bootstrap_lists_claude_models_and_voice_and_model_picker_switch_with_se
 
     // Both the spoken switch and the /model picker apply through
     // thread/settings/update (App::sync_active_thread_model_setting).
-    for (picked, sent) in [(slug, json!("claude-fable-5-2")), ("sonnet".to_string(), json!("sonnet"))] {
+    for (picked, sent) in [
+        (slug, json!("claude-fable-5-2")),
+        ("sonnet".to_string(), json!("sonnet")),
+    ] {
         let updated = fake
             .session
             .thread_settings_update(ThreadSettingsUpdateParams {
@@ -183,7 +193,11 @@ async fn a_configured_claude_model_is_passed_as_model() {
     };
     let config = fake.config.clone();
     fake.session.bootstrap(&config).await.expect("bootstrap");
-    let started = fake.session.start_thread(&config).await.expect("thread/start");
+    let started = fake
+        .session
+        .start_thread(&config)
+        .await
+        .expect("thread/start");
     assert_eq!(started.session.model, "claude-sonnet-5-5");
     let argv = fake
         .log()
@@ -209,4 +223,51 @@ fn claude_code_sessions_are_titled_as_claude_code() {
     assert_eq!(title(true), ">_ Claude Code (codex-voice v1.2.3)");
     assert_eq!(title(false), ">_ OpenAI Codex (v1.2.3)");
     assert_eq!(crate::agent_backend::spoken_agent_name(true), "Claude Code");
+}
+
+#[test]
+fn claude_code_decision_cells_name_claude_code() {
+    use crate::history_cell::ApprovalDecisionActor;
+    use crate::history_cell::ApprovalDecisionSubject;
+    use crate::history_cell::ReviewDecision;
+    let text = |decision, agent: &str| {
+        crate::history_cell::approval_decision_cell_for_agent(
+            ApprovalDecisionSubject::Command(vec!["rm".to_string(), "hello.txt".to_string()]),
+            decision,
+            ApprovalDecisionActor::User,
+            agent,
+        )
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>()
+    };
+    let agent = crate::agent_backend::approval_agent_name(/*claude_code*/ true);
+    assert_eq!(
+        text(ReviewDecision::Denied, agent),
+        "✗ You did not approve Claude Code to run rm hello.txt"
+    );
+    assert_eq!(
+        text(ReviewDecision::Approved, agent),
+        "✔ You approved Claude Code to run rm hello.txt this time"
+    );
+    assert_eq!(
+        text(
+            ReviewDecision::Denied,
+            crate::agent_backend::approval_agent_name(/*claude_code*/ false)
+        ),
+        "✗ You did not approve codex to run rm hello.txt"
+    );
+}
+
+#[test]
+fn claude_code_status_permissions_are_claude_codes() {
+    assert_eq!(
+        crate::agent_backend::status_permissions(Some("claude-code")).as_deref(),
+        Some("Claude Code (asks before risky tools)")
+    );
+    assert_eq!(
+        crate::agent_backend::status_permissions(Some("openai")),
+        None
+    );
 }

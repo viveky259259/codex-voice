@@ -2428,3 +2428,56 @@ fn reset_timestamps_follow_clock_preference() {
     00:00 on 22 Sep
     ");
 }
+
+#[tokio::test]
+async fn claude_code_status_permissions_name_claude_code_not_the_codex_sandbox() {
+    let temp_home = TempDir::new().expect("temp home");
+    let config = test_config(&temp_home).await;
+    let usage = TokenUsage::default();
+    let captured_at = chrono::Local
+        .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+        .single()
+        .expect("timestamp");
+    let permissions = |provider: &str| {
+        let (composite, _handle) = new_status_output_with_rate_limits_handle(
+            &config,
+            /*requires_openai_auth*/ false,
+            Some(provider),
+            /*remote_connection*/ None,
+            /*account_display*/ None,
+            /*token_info*/ None,
+            &usage,
+            &None,
+            /*thread_name*/ None,
+            /*forked_from*/ None,
+            /*rate_limits*/ &[],
+            None,
+            captured_at,
+            "claude-haiku-5-5",
+            /*collaboration_mode*/ None,
+            /*reasoning_effort_override*/ None,
+            "<none>".to_string(),
+            /*refreshing_rate_limits*/ false,
+        );
+        render_lines(&composite.display_lines(/*width*/ 120))
+            .into_iter()
+            .find_map(|line| {
+                Some(
+                    line.split("Permissions:")
+                        .nth(1)?
+                        .trim()
+                        .trim_end_matches('│')
+                        .trim()
+                        .to_string(),
+                )
+            })
+    };
+    assert_eq!(
+        permissions("claude-code").as_deref(),
+        Some("Claude Code (asks before risky tools)")
+    );
+    assert_ne!(
+        permissions("openai").as_deref(),
+        Some("Claude Code (asks before risky tools)")
+    );
+}

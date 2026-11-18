@@ -36,6 +36,27 @@ pub(crate) fn agent_title(claude_code: bool) -> &'static str {
     }
 }
 
+/// The agent named in approval decision cells ("You did not approve codex to
+/// run ...").
+pub(crate) fn approval_agent_name(claude_code: bool) -> &'static str {
+    if claude_code {
+        codex_claude_agent_backend::BACKEND_NAME
+    } else {
+        "codex"
+    }
+}
+
+/// The `/status` permissions line for a session served by Claude Code, whose
+/// own permission rules apply rather than Codex's sandbox and approval policy.
+pub(crate) fn status_permissions(model_provider_id: Option<&str>) -> Option<String> {
+    (model_provider_id == Some(codex_claude_agent_backend::MODEL_PROVIDER)).then(|| {
+        format!(
+            "{} (asks before risky tools)",
+            codex_claude_agent_backend::BACKEND_NAME
+        )
+    })
+}
+
 /// The subject of spoken approval prompts ("Claude Code wants to run ...").
 pub(crate) fn spoken_agent_name(claude_code: bool) -> &'static str {
     if claude_code {
@@ -53,6 +74,8 @@ pub(crate) fn claude_code_options(
 ) -> ClaudeCodeOptions {
     let mut options = ClaudeCodeOptions::new(config.cwd.as_path().to_path_buf());
     options.claude_bin = selection.claude_bin.clone();
+    // Remembers each session's model and effort, so a resume continues with them.
+    options.state_dir = Some(config.codex_home.join("claude-code").to_path_buf());
     options.model = config
         .model
         .clone()

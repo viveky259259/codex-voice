@@ -27,7 +27,8 @@ impl Launch {
 /// The argv the SDK builds for a streaming `query()` with `canUseTool`,
 /// `includePartialMessages`, adaptive summarized thinking and the default
 /// permission mode (the options T3 Code passes), in the SDK's order.
-pub fn claude_args(model: Option<&str>, launch: &Launch) -> Vec<OsString> {
+/// `effort` is the SDK's `effort` option (`--effort=<level>`).
+pub fn claude_args(model: Option<&str>, effort: Option<&str>, launch: &Launch) -> Vec<OsString> {
     let mut args: Vec<String> = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -37,6 +38,9 @@ pub fn claude_args(model: Option<&str>, launch: &Launch) -> Vec<OsString> {
         "--thinking=adaptive".into(),
         "--thinking-display=summarized".into(),
     ];
+    if let Some(effort) = effort {
+        args.push(format!("--effort={effort}"));
+    }
     if let Some(model) = model {
         args.push(format!("--model={model}"));
     }
@@ -77,6 +81,12 @@ pub fn interrupt_request() -> Value {
 /// `model: null` returns to Claude Code's default model.
 pub fn set_model_request(model: Option<&str>) -> Value {
     json!({ "subtype": "set_model", "model": model })
+}
+
+/// The SDK's `applyFlagSettings({effortLevel})`: the effort for the rest of
+/// the session. `null` returns to the model's default effort.
+pub fn set_effort_request(effort: Option<&str>) -> Value {
+    json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } })
 }
 
 /// The answer to a control request the CLI sent us (for example `can_use_tool`).

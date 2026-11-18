@@ -216,6 +216,19 @@ pub fn protocol_models(models: &[ClaudeModel], current: &str) -> Vec<Model> {
         .collect()
 }
 
+/// The Claude Code effort level for a Codex reasoning effort: the levels the
+/// picker offers (`low` ... `max`) map one to one; others have no equivalent.
+pub fn claude_effort(effort: &ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::XHigh => Some("xhigh"),
+        ReasoningEffort::Max => Some("max"),
+        _ => None,
+    }
+}
+
 fn effort_label(effort: &str) -> &str {
     match effort {
         "low" => "Low",

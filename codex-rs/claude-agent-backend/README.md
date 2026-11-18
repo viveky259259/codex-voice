@@ -9,7 +9,9 @@ the app-server requests the TUI sends and emits the notifications and server
 requests a Codex app server would, so the TUI, its approval overlay and the
 voice layer work unchanged. Nothing in core or app-server changes.
 
-Start it with `codex --agent claude-code [--claude-bin PATH] [-m MODEL]`.
+Start it with `codex --agent claude-code [--claude-bin PATH] [-m MODEL]`. A dev
+build (`cargo build -p codex-cli`) has no complete local package, so run it
+with `--no-daemon`: `codex --no-daemon --agent claude-code`.
 
 ## Wire format
 
@@ -26,6 +28,7 @@ The SDK builds, for a streaming `query()` with `canUseTool`,
 ```
 claude --output-format stream-json --verbose --input-format stream-json
        --thinking=adaptive --thinking-display=summarized
+       [--effort=<level>]
        [--model=<id>]
        --permission-prompt-tool=stdio
        [--resume=<session id>]
@@ -47,6 +50,7 @@ the session id we pass with `--session-id`; resuming passes it to `--resume`.
 | user turn | `{"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"..."}]},"parent_tool_use_id":null}` |
 | interrupt | `{"type":"control_request","request_id":ID,"request":{"subtype":"interrupt"}}` |
 | switch model | `{"type":"control_request","request_id":ID,"request":{"subtype":"set_model","model":"sonnet"}}` (`null` = Claude Code's default) |
+| set effort | `{"type":"control_request","request_id":ID,"request":{"subtype":"apply_flag_settings","settings":{"effortLevel":"high"}}}` (the SDK's `applyFlagSettings`) |
 | permission answer | `{"type":"control_response","response":{"subtype":"success","request_id":<can_use_tool id>,"response":PermissionResult}}` |
 | refuse a control request | `{"type":"control_response","response":{"subtype":"error","request_id":ID,"error":"..."}}` |
 
@@ -83,7 +87,7 @@ the session id we pass with `--session-id`; resuming passes it to `--resume`.
 | `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `fileChange` with paths and a unified diff computed from the file and the old/new strings before the tool runs; just the path when the old text is not found |
 | `mcp__<server>__<tool>` | `mcpToolCall` |
 | any other tool | `dynamicToolCall` |
-| `result` | `thread/tokenUsage/updated` + `turn/completed` (`failed` with the CLI's errors, `interrupted` after `turn/interrupt`) |
+| `result` | `thread/tokenUsage/updated` + `turn/completed` (`failed` with the CLI's errors, `interrupted` after `turn/interrupt`). A completed turn carries its last agent message in `turn.items` (`itemsView: summary`), as the Codex app server does; the TUI speaks voice answers from it |
 | `can_use_tool` for `Bash` | `item/commandExecution/requestApproval` |
 | `can_use_tool` for edit tools | `item/fileChange/requestApproval` |
 | `can_use_tool` for `AskUserQuestion` | `item/tool/requestUserInput`; answers return as `updatedInput.answers` keyed by question text |
@@ -91,6 +95,10 @@ the session id we pass with `--session-id`; resuming passes it to `--resume`.
 | Accept / AcceptForSession / Decline / Cancel | allow / allow + session rules (the CLI's suggestions moved to `session`, else an allow rule for the tool) / deny / deny with `interrupt: true` |
 | `initialize` `models` | `model/list`: the CLI's models first, then the built-in fallback (`claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`) for ids it did not list. Each family name (opus, sonnet, haiku, fable) belongs to its first listed model. |
 | `/model`, "switch to sonnet" (`thread/settings/update` `model`) | `set_model` on the running CLI (no restart) |
+| the effort picker, a turn's `effort` (`low` ... `max`) | `apply_flag_settings` `effortLevel` on the running CLI; `--effort` for a new process |
+| `thread/resume` | `--resume`, with the model and effort that session last used (saved in `state_dir/sessions.json`, `$CODEX_HOME/claude-code` from the TUI); a model named on the resume (`-m`) wins |
+| `thread/start` or `thread/resume` of another session while a turn runs | refused: replacing the process would stop the turn (one `claude` process per backend in v1). Wait or interrupt first |
+| `skills/list`, `hooks/list`, `plugin/installed` | empty lists (Claude Code's own skills, hooks and plugins are not Codex's) |
 | `initialize` `account` without a login | a warning to run `claude` and `/login` |
 
 `account/read` reports no OpenAI account and `requiresOpenaiAuth: false`, so
@@ -99,7 +107,7 @@ the TUI skips its login screen. Requests not listed here are refused with
 
 Not mapped: images and other non-text input, steering a running turn,
 history replay on resume (the CLI keeps it; the TUI shows only new turns),
-fork/rollback/compaction, effort changes mid-session, subagent transcripts,
+fork/rollback/compaction, thread attachments, subagent transcripts,
 Codex sandbox policies and execpolicy amendments (Claude Code enforces its own
 permissions; `--permission-mode=default` makes it ask).
 

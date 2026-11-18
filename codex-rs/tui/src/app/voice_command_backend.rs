@@ -62,8 +62,8 @@ use uuid::Uuid;
 
 /// Most `thread/loaded/list` pages followed for one listing.
 const MAX_LOADED_LIST_PAGES: usize = 10;
-/// Words of a thread's first message used as its name when it has none.
-const PREVIEW_NAME_WORDS: usize = 4;
+/// Longest name taken from a thread's first message when it has none.
+const PREVIEW_NAME_CHARS: usize = 40;
 
 /// Sends one app-server request and returns its JSON-RPC result.
 ///
@@ -379,8 +379,9 @@ pub(crate) fn agent_status(status: &ThreadStatus) -> AgentStatus {
     }
 }
 
-/// The thread's title, else its sub-agent nickname, else the first words of
-/// its first message, else a short id.
+/// The thread's title, else its sub-agent nickname, else the first sentence
+/// of its first message (cut at a word, with "…", past 40 characters), else a
+/// short id.
 pub(crate) fn agent_name(thread: &Thread) -> String {
     let named = [thread.name.as_deref(), thread.agent_nickname.as_deref()]
         .into_iter()
@@ -395,12 +396,7 @@ pub(crate) fn agent_name(thread: &Thread) -> String {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| {
-            line.split_whitespace()
-                .take(PREVIEW_NAME_WORDS)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+        .map(|line| super::thread_title::truncate_at_word(first_sentence(line), PREVIEW_NAME_CHARS))
         .unwrap_or_default();
     if !preview.is_empty() {
         return preview;
@@ -415,6 +411,20 @@ pub(crate) fn agent_name(thread: &Thread) -> String {
         .rev()
         .collect();
     format!("agent {tail}")
+}
+
+/// Up to and including the first `.`, `?` or `!` that ends a sentence.
+fn first_sentence(line: &str) -> &str {
+    line.char_indices()
+        .find(|(index, ch)| {
+            matches!(ch, '.' | '?' | '!')
+                && line[index + ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        })
+        .map_or(line, |(index, ch)| &line[..index + ch.len_utf8()])
+        .trim_end_matches('.')
 }
 
 pub(crate) fn agent_info(thread: &Thread, newest_turn: Option<&Turn>) -> AgentInfo {
