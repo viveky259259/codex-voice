@@ -133,17 +133,18 @@ voice = "af_heart"
 ### 3. local-agents MCP for both
 
 Start the server with `uv run mcp_server.py --transport streamable-http`, at
-`http://127.0.0.1:5051/mcp`. **The tool names and argument names below are
-guesses.** Check them first with `cargo run -p codex-local-voice -- tools`.
-A wrong name produces an error that lists the server's tools.
+`http://127.0.0.1:5051/mcp`. Both directions use its `submit_inference` tool,
+which returns a job that `get_job` polls. These names and model ids were
+checked on a Mac against the real server (see issue #12). List the tools with
+`cargo run -p codex-local-voice -- tools`, and the models with its
+`list_models` tool.
 
 ```toml
 [stt]
 backend = "mcp"
 url = "http://127.0.0.1:5051/mcp"
-tool = "transcribe"
-arguments = { model_id = "whisper:base", input_path = "{wav}" }
-# text_path = "result.text"      # where the transcript is in the finished job
+tool = "submit_inference"
+arguments = { model_id = "hf:mlx-community/whisper-base-mlx", input_path = "{wav}", options = { language = "en" } }
 
 [stt.job]
 tool = "get_job"
@@ -154,18 +155,23 @@ timeout_ms = 120000
 [tts]
 backend = "mcp"
 url = "http://127.0.0.1:5051/mcp"
-tool = "speak"
-arguments = { model_id = "hf:mlx-community/Kokoro-82M-8bit", voice = "af_heart", text = "{text}" }
-# audio_path = "artifacts.0.path"  # where speech.wav is in the finished job
-# artifact_dir = "/path/to/local-agents/artifacts"   # for relative paths
+tool = "submit_inference"
+arguments = { model_id = "hf:mlx-community/Kokoro-82M-8bit", prompt = "{text}", options = { voice = "af_heart", language = "en" } }
 
 [tts.job]
 tool = "get_job"
 arguments = { job_id = "{job_id}" }
+poll_interval_ms = 250
+timeout_ms = 120000
 
 [playback]
 player = ["afplay", "{wav}"]
 ```
+
+Other transcription models: `hf:mlx-community/whisper-{tiny,small}-mlx` and
+`hf:mlx-community/whisper-large-v3-turbo`. A short id like `whisper:base` is
+rejected. The default result-path fallbacks find the transcript and the wav,
+so `text_path` and `audio_path` aren't needed.
 
 The MCP client sends `initialize`, `notifications/initialized` and
 `tools/list` once, keeping the `Mcp-Session-Id` header. It then calls `tool`.
