@@ -20,6 +20,7 @@ fn registry() -> ToolRegistry {
             }),
         ],
         &mut registry,
+        "web_search_20260209",
     );
     registry
 }
@@ -227,7 +228,10 @@ fn redacted_thinking_and_refusal() {
         message_start(),
         json!({"type": "content_block_start", "index": 0, "content_block": {"type": "redacted_thinking", "data": "opaque"}}),
         json!({"type": "content_block_stop", "index": 0}),
-        json!({"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {"output_tokens": 2}}),
+        json!({"type": "message_delta", "delta": {
+            "stop_reason": "refusal",
+            "stop_details": {"type": "refusal", "category": "cyber", "explanation": "This looks like malware development."},
+        }, "usage": {"output_tokens": 2}}),
         json!({"type": "message_stop"}),
     ]);
     assert_eq!(
@@ -239,10 +243,133 @@ fn redacted_thinking_and_refusal() {
             "encrypted_content": encode_redacted_thinking("opaque"),
         }})
     );
-    assert_eq!(events[3]["type"], json!("response.incomplete"));
+    assert_eq!(events[3]["type"], json!("response.failed"));
     assert_eq!(
-        events[3]["response"]["incomplete_details"],
-        json!({"reason": "content_filter"})
+        events[3]["response"]["error"],
+        json!({
+            "code": "invalid_prompt",
+            "message": "Claude declined to continue this request (refusal category: cyber). This looks like malware development.",
+        })
+    );
+}
+
+#[test]
+fn refusal_without_details_still_fails() {
+    let events = run(&[
+        message_start(),
+        json!({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": null}}),
+        json!({"type": "message_stop"}),
+    ]);
+    let last = events.last().cloned().unwrap_or_default();
+    assert_eq!(last["type"], json!("response.failed"));
+    assert_eq!(
+        last["response"]["error"]["message"],
+        json!("Claude declined to continue this request (refusal category: unspecified).")
+    );
+}
+
+#[test]
+fn web_search_becomes_a_call_item_and_a_replayable_reasoning_item() {
+    let results = json!([{
+        "type": "web_search_result",
+        "url": "https://docs.rs/serde",
+        "title": "serde - Rust",
+        "encrypted_content": "EqgfCioIARgB",
+        "page_age": null,
+    }]);
+    let events = run(&[
+        message_start(),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\": "}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "\"serde docs\"}"}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "content_block_start", "index": 1, "content_block": {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": results}}),
+        json!({"type": "content_block_stop", "index": 1}),
+        json!({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": "", "citations": []}}),
+        json!({"type": "content_block_delta", "index": 2, "delta": {"type": "citations_delta", "citation": {"type": "web_search_result_location", "url": "https://docs.rs/serde"}}}),
+        json!({"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "See docs.rs."}}),
+        json!({"type": "content_block_stop", "index": 2}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 9}}),
+        json!({"type": "message_stop"}),
+    ]);
+    let search = |status: &str| json!({"type": "web_search_call", "id": "ws_01_0", "status": status, "action": {"type": "search", "query": "serde docs"}});
+    let carrier = json!({
+        "type": "reasoning",
+        "id": "rs_01_0",
+        "summary": [],
+        "encrypted_content": encode_server_blocks(&[
+            json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "serde docs"}}),
+            json!({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": results}),
+        ]),
+    });
+    let item_events: Vec<Value> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["type"].as_str(),
+                Some("response.output_item.added" | "response.output_item.done")
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        item_events,
+        vec![
+            json!({"type": "response.output_item.added", "output_index": 0, "item": search("in_progress")}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": search("completed")}),
+            json!({"type": "response.output_item.added", "output_index": 1, "item": {"type": "reasoning", "id": "rs_01_0", "summary": []}}),
+            json!({"type": "response.output_item.done", "output_index": 1, "item": carrier}),
+            json!({"type": "response.output_item.added", "output_index": 2, "item": {"type": "message", "id": "msg_01_2", "role": "assistant", "status": "in_progress", "content": []}}),
+            json!({"type": "response.output_item.done", "output_index": 2, "item": {
+                "type": "message", "id": "msg_01_2", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": "See docs.rs.", "annotations": []}],
+            }}),
+        ]
+    );
+    let completed = events.last().cloned().unwrap_or_default();
+    assert_eq!(completed["type"], json!("response.completed"));
+    assert_eq!(
+        completed["response"]["output"].as_array().map(Vec::len),
+        Some(3)
+    );
+}
+
+#[test]
+fn web_search_errors_and_trailing_server_blocks() {
+    let events = run(&[
+        message_start(),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "q"}}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "content_block_start", "index": 1, "content_block": {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}}}),
+        json!({"type": "content_block_stop", "index": 1}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "pause_turn"}}),
+        json!({"type": "message_stop"}),
+    ]);
+    let kinds: Vec<String> = events
+        .iter()
+        .map(|event| {
+            format!(
+                "{}:{}:{}",
+                event["type"].as_str().unwrap_or_default(),
+                event["item"]["type"].as_str().unwrap_or_default(),
+                event["item"]["status"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "response.created::",
+            "response.output_item.added:web_search_call:in_progress",
+            "response.output_item.done:web_search_call:failed",
+            "response.output_item.added:reasoning:",
+            "response.output_item.done:reasoning:",
+            "response.completed::",
+        ]
+    );
+    assert_eq!(
+        events.last().cloned().unwrap_or_default()["response"]["end_turn"],
+        json!(false)
     );
 }
 

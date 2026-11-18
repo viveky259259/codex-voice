@@ -35,6 +35,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::WebSearchAction;
 use codex_protocol::openai_models::ReasoningEffort;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -45,6 +46,7 @@ use tokio::net::TcpListener;
 
 const FIRST_TURN: &str = include_str!("fixtures/thinking_text_tool_use.sse");
 const SECOND_TURN: &str = include_str!("fixtures/final_answer.sse");
+const WEB_SEARCH_TURN: &str = include_str!("fixtures/web_search.sse");
 const SIGNATURE: &str = "EqQBCkYIBRgCKkBfixture+signature/==";
 
 #[derive(Clone, Default)]
@@ -283,7 +285,7 @@ async fn translates_a_tool_turn_and_round_trips_history() {
     assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
     assert_eq!(
         first["system"],
-        json!([{"type": "text", "text": "You are Codex, a coding agent."}])
+        json!([{"type": "text", "text": "You are Codex, a coding agent.", "cache_control": {"type": "ephemeral"}}])
     );
     assert_eq!(
         first["thinking"],
@@ -381,7 +383,11 @@ fn codex_client(proxy: SocketAddr) -> ResponsesClient<ReqwestTransport> {
 }
 
 fn codex_request(input: Vec<ResponseItem>) -> ResponsesApiRequest {
-    let tools: Arc<RawValue> = serde_json::value::to_raw_value(&tools()).unwrap().into();
+    codex_request_with_tools(input, tools())
+}
+
+fn codex_request_with_tools(input: Vec<ResponseItem>, tools: Value) -> ResponsesApiRequest {
+    let tools: Arc<RawValue> = serde_json::value::to_raw_value(&tools).unwrap().into();
     ResponsesApiRequest {
         model: "claude-opus-5-5".to_string(),
         stream: true,
@@ -427,6 +433,7 @@ fn item_kind(item: &ResponseItem) -> &'static str {
         ResponseItem::Message { .. } => "message",
         ResponseItem::FunctionCall { .. } => "function_call",
         ResponseItem::CustomToolCall { .. } => "custom_tool_call",
+        ResponseItem::WebSearchCall { .. } => "web_search_call",
         _ => "other",
     }
 }
@@ -630,7 +637,7 @@ async fn codex_parser_and_history_types_accept_the_translation() {
     let (_, second) = &requests[1];
     assert_eq!(
         second["system"],
-        json!([{"type": "text", "text": "You are Codex, a coding agent."}])
+        json!([{"type": "text", "text": "You are Codex, a coding agent.", "cache_control": {"type": "ephemeral"}}])
     );
     assert_eq!(
         second["messages"],
@@ -648,6 +655,116 @@ async fn codex_parser_and_history_types_accept_the_translation() {
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "toolu_01Fixture", "content": "a.txt\nb.txt"},
             ]},
+        ])
+    );
+}
+
+/// Codex's hosted `web_search` tool runs as Anthropic's web search server
+/// tool. Codex's parser sees a `web_search_call` item; the search results ride
+/// in a reasoning item and are replayed to Claude on the next request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_search_runs_server_side_and_its_results_stay_in_history() {
+    let (mock, proxy) = start().await;
+    mock.reply(StatusCode::OK, WEB_SEARCH_TURN);
+    mock.reply(StatusCode::OK, SECOND_TURN);
+
+    let mut tools = tools();
+    tools
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type": "web_search", "external_web_access": true}));
+    let base_history = vec![
+        input_message("developer", "You are Codex, a coding agent."),
+        input_message("user", "When was Tokio 2.0 released?"),
+    ];
+
+    let turn = codex_turn(
+        proxy,
+        codex_request_with_tools(base_history.clone(), tools.clone()),
+    )
+    .await;
+    assert_eq!(
+        turn.labels,
+        vec![
+            "rate_limits:none",
+            "created:resp_03Fixture",
+            "added:reasoning",
+            "summary_part:0",
+            "summary:I should search.",
+            "summary_done:I should search.",
+            "done:reasoning",
+            "added:web_search_call",
+            "done:web_search_call",
+            "added:reasoning",
+            "done:reasoning",
+            "added:message",
+            "text:Tokio 2.0 is out.",
+            "done:message",
+            "completed:resp_03Fixture:end_turn=None",
+        ]
+    );
+    let [_, search, carrier, _] = turn.done_items.as_slice() else {
+        panic!("expected four output items, got {:?}", turn.done_items);
+    };
+    let ResponseItem::WebSearchCall { status, action, .. } = search else {
+        panic!("expected a web search call, got {search:?}");
+    };
+    assert_eq!(status.as_deref(), Some("completed"));
+    assert_eq!(
+        action,
+        &Some(WebSearchAction::Search {
+            query: Some("tokio 2 release date".to_string()),
+            queries: None,
+        })
+    );
+    assert!(
+        matches!(carrier, ResponseItem::Reasoning { encrypted_content: Some(content), .. }
+            if content.starts_with("anthropic-server-blocks-v1:")),
+        "search results must ride in a reasoning item: {carrier:?}"
+    );
+
+    // Turn 2: Codex strips `encrypted_content` from every item but reasoning
+    // when it talks to a non-OpenAI provider; the results must survive that.
+    let mut history = base_history;
+    for mut item in turn.done_items {
+        if !matches!(item, ResponseItem::Reasoning { .. }) {
+            item.clear_encrypted_content();
+        }
+        history.push(item);
+    }
+    history.push(input_message("user", "Thanks!"));
+    let turn = codex_turn(proxy, codex_request_with_tools(history, tools)).await;
+    assert_eq!(
+        turn.labels.last().map(String::as_str),
+        Some("completed:resp_02Fixture:end_turn=None")
+    );
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+    let (_, first) = &requests[0];
+    assert_eq!(
+        first["tools"][1],
+        json!({"type": "web_search_20260209", "name": "web_search"})
+    );
+    let (_, second) = &requests[1];
+    assert_eq!(second["tools"], first["tools"]);
+    assert_eq!(
+        second["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": "When was Tokio 2.0 released?"}]},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "I should search.", "signature": "EqQBsearch+sig=="},
+                {"type": "server_tool_use", "id": "srvtoolu_01Fixture", "name": "web_search", "input": {"query": "tokio 2 release date"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01Fixture", "content": [{
+                    "type": "web_search_result",
+                    "title": "Tokio 2.0 released",
+                    "url": "https://tokio.rs/blog/tokio-2",
+                    "encrypted_content": "EqgfCioIARgBIiQ3YTAwMjY1Mi1mZjM5",
+                    "page_age": "2 days ago",
+                }]},
+                {"type": "text", "text": "Tokio 2.0 is out."},
+            ]},
+            {"role": "user", "content": [{"type": "text", "text": "Thanks!"}]},
         ])
     );
 }

@@ -17,12 +17,14 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod dump;
+mod models;
 mod reasoning;
 mod request;
 mod server;
 mod stream;
 mod tools;
 
+pub use request::CacheTtl;
 pub use request::TranslateOptions;
 pub use server::ApiKey;
 pub use server::DEFAULT_ANTHROPIC_BASE_URL;
@@ -71,6 +73,15 @@ pub struct Args {
     #[arg(long, default_value_t = TranslateOptions::default().max_tokens)]
     pub max_tokens: u32,
 
+    /// Lifetime of prompt cache entries: `5m` (default) or `1h` (2x write
+    /// cost; pays off when turns are more than 5 minutes apart).
+    #[arg(long, value_enum, default_value = "5m")]
+    pub cache_ttl: CacheTtl,
+
+    /// Send no `cache_control` (disables prompt caching).
+    #[arg(long)]
+    pub no_cache: bool,
+
     /// Record each translated request and both streams into this directory.
     #[arg(long, value_name = "DIR")]
     pub dump_dir: Option<PathBuf>,
@@ -103,6 +114,7 @@ pub fn run_main(args: Args) -> anyhow::Result<()> {
         anthropic_beta: args.anthropic_beta,
         translate: TranslateOptions {
             max_tokens: args.max_tokens,
+            cache_ttl: (!args.no_cache).then_some(args.cache_ttl),
         },
         dump_dir: args.dump_dir,
     };

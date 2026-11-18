@@ -110,14 +110,102 @@ fn fnv1a_32(bytes: &[u8]) -> u32 {
     hash
 }
 
+/// Name of the Anthropic web search server tool.
+pub(crate) const WEB_SEARCH_TOOL_NAME: &str = "web_search";
+
 /// Translates the Responses `tools` array into Anthropic tool definitions and
 /// records how to map Anthropic tool calls back to Codex items.
-pub(crate) fn translate_tools(tools: &[Value], registry: &mut ToolRegistry) -> Vec<Value> {
+///
+/// The output is deterministic for a given tool set, so it can sit in the
+/// cached prompt prefix: client tools are sorted by name, JSON keys are
+/// sorted, and the web search server tool (when Codex declares `web_search`)
+/// comes last, as `web_search_type`.
+pub(crate) fn translate_tools(
+    tools: &[Value],
+    registry: &mut ToolRegistry,
+    web_search_type: &str,
+) -> Vec<Value> {
     let mut out = Vec::new();
+    let mut web_search = None;
     for tool in tools {
-        translate_tool(tool, /*namespace*/ None, registry, &mut out);
+        match tool.get("type").and_then(Value::as_str) {
+            Some("web_search" | "web_search_preview") => {
+                if web_search.is_none() {
+                    web_search = Some(web_search_tool(tool, web_search_type));
+                }
+            }
+            _ => translate_tool(tool, /*namespace*/ None, registry, &mut out),
+        }
+    }
+    out.sort_by(|a, b| tool_name(a).cmp(tool_name(b)));
+    let mut out: Vec<Value> = out.iter().map(canonical_json).collect();
+    if let Some(web_search) = web_search {
+        if registry.lookup(WEB_SEARCH_TOOL_NAME).is_some() {
+            debug!("a client tool is named web_search; not adding the web search server tool");
+        } else {
+            out.push(canonical_json(&web_search));
+        }
     }
     out
+}
+
+fn tool_name(tool: &Value) -> &str {
+    tool.get("name").and_then(Value::as_str).unwrap_or_default()
+}
+
+/// Maps Codex's hosted `web_search` tool to Anthropic's web search server
+/// tool. Anthropic search is always live: Codex's cached mode
+/// (`external_web_access: false`) has no equivalent.
+fn web_search_tool(tool: &Value, web_search_type: &str) -> Value {
+    let mut definition = json!({"type": web_search_type, "name": WEB_SEARCH_TOOL_NAME});
+    let allowed_domains: Vec<Value> = tool
+        .get("filters")
+        .and_then(|filters| filters.get("allowed_domains"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|domain| domain.as_str().is_some_and(|domain| !domain.is_empty()))
+        .cloned()
+        .collect();
+    if !allowed_domains.is_empty() {
+        definition["allowed_domains"] = Value::Array(allowed_domains);
+    }
+    if let Some(location) = tool.get("user_location").and_then(Value::as_object) {
+        let mut user_location = Map::new();
+        for key in ["city", "region", "country", "timezone"] {
+            if let Some(value) = location
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                user_location.insert(key.to_string(), Value::String(value.to_string()));
+            }
+        }
+        if !user_location.is_empty() {
+            user_location.insert("type".to_string(), Value::String("approximate".to_string()));
+            definition["user_location"] = Value::Object(user_location);
+        }
+    }
+    definition
+}
+
+/// Rebuilds a JSON value with every object's keys in sorted order, so the
+/// serialized bytes do not depend on how the input map was ordered.
+pub(crate) fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonical_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
 }
 
 fn translate_tool(
@@ -286,6 +374,55 @@ mod tests {
 
         let long = anthropic_tool_name(Some(&"n".repeat(40)), &"t".repeat(40));
         assert_eq!(long.len(), 64);
+    }
+
+    #[test]
+    fn tools_are_sorted_and_web_search_becomes_a_server_tool() {
+        let function = |name: &str| json!({"type": "function", "name": name, "parameters": {"type": "object", "properties": {"b": {"type": "string"}, "a": {"type": "string"}}}});
+        let web_search = json!({
+            "type": "web_search",
+            "external_web_access": true,
+            "filters": {"allowed_domains": ["docs.rs"]},
+            "user_location": {"type": "approximate", "country": "US", "city": null},
+        });
+        let mut registry = ToolRegistry::default();
+        let first = translate_tools(
+            &[web_search.clone(), function("zeta"), function("alpha")],
+            &mut registry,
+            "web_search_20260209",
+        );
+        let second = translate_tools(
+            &[function("alpha"), function("zeta"), web_search],
+            &mut ToolRegistry::default(),
+            "web_search_20260209",
+        );
+        assert_eq!(
+            serde_json::to_string(&first).ok(),
+            serde_json::to_string(&second).ok()
+        );
+        let names: Vec<&str> = first.iter().map(tool_name).collect();
+        assert_eq!(names, vec!["alpha", "zeta", "web_search"]);
+        assert_eq!(
+            first[2],
+            json!({
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "allowed_domains": ["docs.rs"],
+                "user_location": {"type": "approximate", "country": "US"},
+            })
+        );
+        assert_eq!(registry.lookup("web_search"), None);
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys() {
+        let mut map = Map::new();
+        map.insert("z".to_string(), json!(1));
+        map.insert("a".to_string(), json!({"y": 2, "b": 3}));
+        assert_eq!(
+            canonical_json(&Value::Object(map)).to_string(),
+            r#"{"a":{"b":3,"y":2},"z":1}"#
+        );
     }
 
     #[test]
