@@ -37,7 +37,11 @@ struct Fake {
 impl Fake {
     /// None when python3 is missing (the test is then skipped).
     fn start(scenario: &str, model: Option<&str>) -> Option<Self> {
-        let dir = tempfile::tempdir().expect("tempdir");
+        Self::start_in(tempfile::tempdir().expect("tempdir"), scenario, model)
+    }
+
+    /// A backend whose state (`sessions.json`) and fake CLI log live in `dir`.
+    fn start_in(dir: TempDir, scenario: &str, model: Option<&str>) -> Option<Self> {
         let script = codex_claude_agent_backend::test_support::write_fake_claude(dir.path())?;
         let mut options = ClaudeCodeOptions::new(dir.path().to_path_buf());
         options.claude_bin = script;
@@ -50,6 +54,7 @@ impl Fake {
             ("FAKE_CLAUDE_SCENARIO".into(), scenario.into()),
         ];
         options.init_timeout = Duration::from_secs(10);
+        options.state_dir = Some(dir.path().join("state"));
         let client = codex_claude_agent_backend::start(options);
         Some(Self {
             dir,
@@ -138,6 +143,18 @@ impl Fake {
             .collect()
     }
 
+    /// Waits until `count` processes have logged their argv; returns the last.
+    async fn wait_for_argvs(&self, count: usize) -> Vec<String> {
+        for _ in 0..200 {
+            let argvs = self.argvs();
+            if argvs.len() >= count {
+                return argvs[count - 1].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("expected {count} processes: {:#?}", self.argvs());
+    }
+
     /// Waits until the fake has logged a stdin message matching `want`.
     async fn wait_for_stdin(&self, want: impl Fn(&Value) -> bool) -> Value {
         for _ in 0..200 {
@@ -151,6 +168,19 @@ impl Fake {
             self.stdin()
         );
     }
+}
+
+fn turn_completed(events: &[AppServerEvent]) -> &codex_app_server_protocol::Turn {
+    events
+        .iter()
+        .find_map(|event| match event {
+            AppServerEvent::ServerNotification(n) => match n.as_ref() {
+                ServerNotification::TurnCompleted(n) => Some(&n.turn),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("turn/completed")
 }
 
 fn is_turn_completed(event: &AppServerEvent) -> bool {
@@ -280,6 +310,22 @@ async fn a_text_and_thinking_reply() {
             "turn/completed Completed None",
         ]
     );
+    // The completed turn carries its final answer, as the Codex app server's
+    // does: the TUI speaks voice answers from it.
+    let completed = turn_completed(&events);
+    assert_eq!(
+        completed
+            .items
+            .iter()
+            .map(|entry| item(&entry.payload))
+            .collect::<Vec<_>>(),
+        vec!["agentMessage \"Hello from Claude.\"".to_string()]
+    );
+    assert_eq!(
+        completed.items_view,
+        codex_app_server_protocol::TurnItemsView::Summary
+    );
+    assert_eq!(completed.items[0].id(), "msg_1:text:0");
     let argv = &fake.argvs()[0];
     assert!(argv.contains(&format!("--session-id={}", started.thread.id)));
     assert!(!argv.iter().any(|arg| arg.starts_with("--model")));
@@ -593,4 +639,288 @@ async fn unsupported_requests_are_refused_explicitly() {
         "{}",
         refused.message
     );
+}
+
+#[tokio::test]
+async fn a_tool_turn_carries_the_answer_after_the_tool() {
+    let Some(mut fake) = Fake::start("bash", /*model*/ None) else {
+        return;
+    };
+    let started = fake.thread_start().await;
+    fake.events_until(|_| true).await;
+    fake.turn_start(&started.thread.id, "Run echo").await;
+    let events = fake.events_until(is_server_request).await;
+    let request_id = request_id_of(events.last().expect("request"));
+    fake.client
+        .resolve_server_request(request_id, json!({"decision": "accept"}))
+        .await
+        .expect("resolve");
+    let events = fake.events_until(is_turn_completed).await;
+    let completed = turn_completed(&events);
+    assert_eq!(
+        completed
+            .items
+            .iter()
+            .map(|entry| item(&entry.payload))
+            .collect::<Vec<_>>(),
+        vec!["agentMessage \"Done.\"".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn an_interrupted_turn_carries_no_answer() {
+    let Some(mut fake) = Fake::start("interrupt", /*model*/ None) else {
+        return;
+    };
+    let started = fake.thread_start().await;
+    fake.events_until(|_| true).await;
+    let turn = fake.turn_start(&started.thread.id, "Work").await;
+    fake.events_until(|event| {
+        matches!(event, AppServerEvent::ServerNotification(n) if matches!(**n, ServerNotification::AgentMessageDelta(_)))
+    })
+    .await;
+    let request_id = fake.id();
+    fake.client
+        .request(ClientRequest::TurnInterrupt {
+            request_id,
+            params: TurnInterruptParams {
+                thread_id: started.thread.id.clone(),
+                turn_id: turn.turn.id,
+            },
+        })
+        .await
+        .expect("send")
+        .expect("turn/interrupt");
+    let events = fake.events_until(is_turn_completed).await;
+    let completed = turn_completed(&events);
+    assert_eq!(completed.status, TurnStatus::Interrupted);
+    assert!(completed.items.is_empty());
+    assert_eq!(
+        completed.items_view,
+        codex_app_server_protocol::TurnItemsView::NotLoaded
+    );
+}
+
+#[tokio::test]
+async fn a_second_thread_start_never_stops_a_running_turn() {
+    let Some(mut fake) = Fake::start("interrupt", /*model*/ None) else {
+        return;
+    };
+    let started = fake.thread_start().await;
+    fake.events_until(|_| true).await;
+    let turn = fake
+        .turn_start(&started.thread.id, "Work for a while")
+        .await;
+    fake.events_until(|event| {
+        matches!(event, AppServerEvent::ServerNotification(n) if matches!(**n, ServerNotification::AgentMessageDelta(_)))
+    })
+    .await;
+
+    // A title thread, `/new`, or a resume of another session while the turn runs.
+    let request_id = fake.id();
+    let refused = fake
+        .client
+        .request(ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams::default(),
+        })
+        .await
+        .expect("send")
+        .expect_err("refused while a turn runs");
+    assert!(
+        refused.message.contains("still working"),
+        "{}",
+        refused.message
+    );
+    let request_id = fake.id();
+    fake.client
+        .request(ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: "0199a213-81c0-7800-8aa1-bbab2a035a53".to_string(),
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("send")
+        .expect_err("resume refused while a turn runs");
+
+    // The turn is still running on the same process and finishes normally.
+    assert_eq!(fake.argvs().len(), 1);
+    let request_id = fake.id();
+    fake.client
+        .request(ClientRequest::TurnInterrupt {
+            request_id,
+            params: TurnInterruptParams {
+                thread_id: started.thread.id.clone(),
+                turn_id: turn.turn.id,
+            },
+        })
+        .await
+        .expect("send")
+        .expect("turn/interrupt");
+    let events = fake.events_until(is_turn_completed).await;
+    assert_eq!(
+        describe(&events).last().map(String::as_str),
+        Some("turn/completed Interrupted None"),
+        "{:#?}",
+        describe(&events)
+    );
+
+    // Once idle, a new thread replaces the process as before.
+    let next = fake.thread_start().await;
+    assert_ne!(next.thread.id, started.thread.id);
+    fake.wait_for_argvs(2).await;
+    assert_eq!(fake.argvs().len(), 2);
+}
+
+#[tokio::test]
+async fn startup_lists_are_empty_not_refused() {
+    let Some(mut fake) = Fake::start("text", /*model*/ None) else {
+        return;
+    };
+    let cwd = fake.dir.path().to_path_buf();
+    let request_id = fake.id();
+    let skills: codex_app_server_protocol::SkillsListResponse = fake
+        .client
+        .request_typed(ClientRequest::SkillsList {
+            request_id,
+            params: Default::default(),
+        })
+        .await
+        .expect("skills/list");
+    assert_eq!(skills.data.len(), 1);
+    assert_eq!(skills.data[0].cwd, cwd);
+    assert!(skills.data[0].skills.is_empty() && skills.data[0].errors.is_empty());
+    let request_id = fake.id();
+    let hooks: codex_app_server_protocol::HooksListResponse = fake
+        .client
+        .request_typed(ClientRequest::HooksList {
+            request_id,
+            params: Default::default(),
+        })
+        .await
+        .expect("hooks/list");
+    assert_eq!(hooks.data.len(), 1);
+    assert!(hooks.data[0].hooks.is_empty());
+    let request_id = fake.id();
+    let plugins: codex_app_server_protocol::PluginInstalledResponse = fake
+        .client
+        .request_typed(ClientRequest::PluginInstalled {
+            request_id,
+            params: codex_app_server_protocol::PluginInstalledParams {
+                cwds: None,
+                install_suggestion_plugin_names: None,
+            },
+        })
+        .await
+        .expect("plugin/installed");
+    assert!(plugins.marketplaces.is_empty());
+    // Nothing needed a process.
+    assert!(fake.argvs().is_empty());
+}
+
+#[tokio::test]
+async fn effort_applies_with_apply_flag_settings_and_resume_restores_the_model() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().to_path_buf();
+    let Some(mut fake) = Fake::start_in(dir, "text", /*model*/ None) else {
+        return;
+    };
+    let started = fake.thread_start().await;
+    let session_id = started.thread.id.clone();
+    let request_id = fake.id();
+    fake.client
+        .request(ClientRequest::ThreadSettingsUpdate {
+            request_id,
+            params: ThreadSettingsUpdateParams {
+                thread_id: session_id.clone(),
+                model: Some("haiku".to_string()),
+                effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("send")
+        .expect("thread/settings/update");
+    let written = fake
+        .wait_for_stdin(|message| message["request"]["subtype"] == "apply_flag_settings")
+        .await;
+    assert_eq!(
+        written["request"],
+        json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}})
+    );
+    // A turn's effort (the footer's level) is applied too.
+    let request_id = fake.id();
+    let _: TurnStartResponse = fake
+        .client
+        .request_typed(ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: session_id.clone(),
+                input: vec![UserInput::Text {
+                    text: "Hi".into(),
+                    text_elements: Vec::new(),
+                }],
+                effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("turn/start");
+    fake.events_until(is_turn_completed).await;
+    fake.wait_for_stdin(|message| message["request"]["settings"]["effortLevel"] == "low")
+        .await;
+    fake.client.shutdown().await.expect("shutdown");
+
+    // Quit and resume: the model and effort in use come back.
+    let dir = fake.dir;
+    let Some(mut fake) = Fake::start_in(dir, "text", /*model*/ None) else {
+        return;
+    };
+    let request_id = fake.id();
+    let resumed: ThreadResumeResponse = fake
+        .client
+        .request_typed(ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: session_id.clone(),
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("thread/resume");
+    assert_eq!(resumed.model, "claude-haiku-5-5");
+    assert_eq!(
+        resumed.reasoning_effort,
+        Some(codex_protocol::openai_models::ReasoningEffort::Low)
+    );
+    let argv = fake.wait_for_argvs(2).await;
+    assert!(argv.contains(&format!("--resume={session_id}")), "{argv:?}");
+    assert!(
+        argv.contains(&"--model=claude-haiku-5-5".to_string()),
+        "{argv:?}"
+    );
+    assert!(argv.contains(&"--effort=low".to_string()), "{argv:?}");
+    assert!(state.join("state/sessions.json").is_file());
+
+    // A model named on the resume (`-m`) wins over the saved one.
+    fake.client.shutdown().await.expect("shutdown");
+    let Some(mut fake) = Fake::start_in(fake.dir, "text", /*model*/ None) else {
+        return;
+    };
+    let request_id = fake.id();
+    let resumed: ThreadResumeResponse = fake
+        .client
+        .request_typed(ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: session_id,
+                model: Some("claude-opus-5-5".to_string()),
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("thread/resume");
+    assert_eq!(resumed.model, "claude-opus-5-5");
 }

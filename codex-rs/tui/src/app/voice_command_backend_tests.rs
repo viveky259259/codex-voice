@@ -115,7 +115,19 @@ fn thread_status_maps_to_agent_status() {
 fn agent_names_fall_back_from_title_to_nickname_to_preview_to_id() {
     let mut named = thread("0199-abcd", ThreadStatus::Idle);
     named.preview = "Fix the flaky parser test in core please".to_string();
-    assert_eq!(agent_name(&named), "Fix the flaky parser");
+    assert_eq!(
+        agent_name(&named),
+        "Fix the flaky parser test in core please"
+    );
+    // A Claude Code session has no generated title: its first message names it,
+    // cut at a word, not mid-phrase.
+    named.preview = "List the files in this folder".to_string();
+    assert_eq!(agent_name(&named), "List the files in this folder");
+    named.preview = "List the files. Then count them.".to_string();
+    assert_eq!(agent_name(&named), "List the files");
+    named.preview = "Refactor the parser so empty input no longer panics".to_string();
+    assert_eq!(agent_name(&named), "Refactor the parser so empty input no…");
+    named.preview = "Fix the flaky parser test in core please".to_string();
     named.agent_nickname = Some("Scout".to_string());
     assert_eq!(agent_name(&named), "Scout");
     named.name = Some("  build  ".to_string());

@@ -11,6 +11,7 @@ mod approvals;
 mod diff;
 mod mapping;
 pub mod models;
+mod state;
 pub mod wire;
 mod worker;
 
@@ -39,6 +40,9 @@ pub struct ClaudeCodeOptions {
     pub env: Vec<(OsString, OsString)>,
     /// How long `model/list` waits for the CLI's `initialize` response.
     pub init_timeout: Duration,
+    /// Where each session's model and effort are remembered for a resume
+    /// (`sessions.json`). `None` remembers nothing.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl ClaudeCodeOptions {
@@ -49,6 +53,7 @@ impl ClaudeCodeOptions {
             cwd,
             env: Vec::new(),
             init_timeout: Duration::from_secs(15),
+            state_dir: None,
         }
     }
 }

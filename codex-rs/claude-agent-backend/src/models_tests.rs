@@ -127,3 +127,29 @@ fn protocol_models_carry_names_efforts_and_the_current_model() {
     assert_eq!(opus.default_reasoning_effort, ReasoningEffort::Medium);
     assert!(!models[0].is_default);
 }
+
+#[test]
+fn picker_efforts_map_to_claude_code_levels() {
+    let mapped: Vec<Option<&str>> = [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::Minimal,
+    ]
+    .iter()
+    .map(claude_effort)
+    .collect();
+    assert_eq!(
+        mapped,
+        vec![
+            Some("low"),
+            Some("medium"),
+            Some("high"),
+            Some("xhigh"),
+            Some("max"),
+            None
+        ]
+    );
+}

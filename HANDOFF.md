@@ -33,7 +33,8 @@ against a fake `claude`; nothing has run against a real login yet.
    once and `/login` if it asks. No ANTHROPIC_API_KEY is needed; unset it so
    the test uses the login (`unset ANTHROPIC_API_KEY`).
 3. In a scratch git repo (`mkdir /tmp/cc27 && cd /tmp/cc27 && git init`):
-   `/ABS/PATH/codex-rs/target/debug/codex --agent claude-code`. Check: the
+   `/ABS/PATH/codex-rs/target/debug/codex --no-daemon --agent claude-code`
+   (a dev build needs `--no-daemon`). Check: the
    header says "Claude Code (codex-voice v…)", no Codex login screen, no
    warning "does not report a login". Keep your `[realtime] backend = "local"`
    config from #3 so voice starts.
@@ -50,7 +51,7 @@ against a fake `claude`; nothing has run against a real login yet.
    edit cell shows declined. Then ask for a long task and press Esc: the turn
    ends as interrupted.
 7. `/status` and the token usage after a turn; note what they show.
-8. Resume: quit, then run `codex --agent claude-code resume <session id>`
+8. Resume: quit, then run `codex --no-daemon --agent claude-code resume <session id>`
    (the id is the newest `~/.claude/projects/*/<id>.jsonl`). Unverified: say
    whether it continues with the earlier context (earlier turns are not
    replayed on screen; that is expected).

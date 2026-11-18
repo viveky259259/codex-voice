@@ -18,6 +18,7 @@ use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TokenUsageBreakdown;
 use codex_app_server_protocol::TurnError;
@@ -93,6 +94,8 @@ pub struct TurnMapper {
     tools: HashMap<String, Tool>,
     tool_order: Vec<String>,
     declined: HashSet<String>,
+    /// The latest completed agent message with text: the turn's answer.
+    last_agent_message: Option<ThreadItem>,
 }
 
 impl TurnMapper {
@@ -109,6 +112,7 @@ impl TurnMapper {
             tools: HashMap::new(),
             tool_order: Vec::new(),
             declined: HashSet::new(),
+            last_agent_message: None,
         }
     }
 
@@ -121,9 +125,37 @@ impl TurnMapper {
         self.declined.insert(tool_use_id.to_string());
     }
 
+    /// The turn's final answer for `turn/completed`, as the Codex app server
+    /// reports it: the last completed agent message with text.
+    pub fn last_agent_message(&self) -> Option<&ThreadItem> {
+        self.last_agent_message.as_ref()
+    }
+
+    fn note_completed(&mut self, notifications: &[ServerNotification]) {
+        for notification in notifications {
+            if let ServerNotification::ItemCompleted(completed) = notification
+                && let ThreadItemPayload::AgentMessage { text, .. } = &completed.item.payload
+                && !text.trim().is_empty()
+            {
+                self.last_agent_message = Some(completed.item.clone());
+            }
+        }
+    }
+
     /// One stdout message from the CLI. Subagent output (`parent_tool_use_id`
     /// set) is not shown.
     pub fn on_message(
+        &mut self,
+        message: &Value,
+        now_ms: i64,
+        read: &dyn Fn(&Path) -> Option<String>,
+    ) -> Vec<ServerNotification> {
+        let out = self.map_message(message, now_ms, read);
+        self.note_completed(&out);
+        out
+    }
+
+    fn map_message(
         &mut self,
         message: &Value,
         now_ms: i64,
@@ -397,6 +429,7 @@ impl TurnMapper {
             };
             out.extend(self.finish_tool(&id, outcome, now_ms));
         }
+        self.note_completed(&out);
         out
     }
 

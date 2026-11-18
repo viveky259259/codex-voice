@@ -352,6 +352,10 @@ impl StatusHistoryCell {
             &approval,
             workspace_root_suffix.as_deref(),
         );
+        // Codex's sandbox and approval policy do not apply to a Claude Code
+        // session; its own permission rules do.
+        let permissions = crate::agent_backend::status_permissions(model_provider.as_deref())
+            .unwrap_or(permissions);
         let show_chatgpt_usage_link = requires_openai_auth;
         let mut account = compose_account_display(account_display);
         let workspace_matches_provider = if remote_connection.is_some() {

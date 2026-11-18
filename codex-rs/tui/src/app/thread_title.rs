@@ -383,15 +383,36 @@ fn fallback_thread_title(message: &str) -> Option<String> {
             _ => {}
         }
     }
-    let mut title = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = title.char_indices().skip(MAX_CHARS - 1);
-    if let Some((end, _)) = chars.next()
-        && chars.next().is_some()
-    {
-        title.truncate(title[..end].trim_end().len());
-        title.push('…');
-    }
+    let title = truncate_at_word(&text, MAX_CHARS);
     (!title.is_empty()).then_some(title)
+}
+
+/// `text` with whitespace collapsed, cut at a word boundary to at most
+/// `max_chars` characters and ended with `…` when cut. A single word longer
+/// than that is cut inside the word.
+pub(super) fn truncate_at_word(text: &str, max_chars: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let whole = words.join(" ");
+    if whole.chars().count() <= max_chars {
+        return whole;
+    }
+    let budget = max_chars.saturating_sub(1);
+    let mut cut = String::new();
+    for word in &words {
+        let needed = cut.chars().count() + usize::from(!cut.is_empty()) + word.chars().count();
+        if needed > budget {
+            break;
+        }
+        if !cut.is_empty() {
+            cut.push(' ');
+        }
+        cut.push_str(word);
+    }
+    if cut.is_empty() {
+        cut = whole.chars().take(budget).collect();
+    }
+    let cut = cut.trim_end_matches([',', ';', ':', '-', ' ']);
+    format!("{cut}…")
 }
 
 /// Build a bounded title request without truncating a Unicode character.

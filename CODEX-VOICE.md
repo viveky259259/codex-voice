@@ -214,7 +214,10 @@ claude                                   # once: log in with /login
 codex --agent claude-code                # Claude Code's default model
 codex --agent claude-code -m opus        # or any id `claude` accepts
 codex --agent claude-code --claude-bin /opt/homebrew/bin/claude
+codex --no-daemon --agent claude-code    # a dev build (cargo build -p codex-cli)
 ```
+
+A dev build has no complete local package, so it needs `--no-daemon`.
 
 - The header and `/status` say "Claude Code". `-m` (or `model` in config.toml)
   is passed as `--model` only when it names a Claude model.
@@ -222,7 +225,12 @@ codex --agent claude-code --claude-bin /opt/homebrew/bin/claude
   claude-opus-5-5, claude-sonnet-5-5 and claude-haiku-5-5. Picking one, or
   saying "switch to opus" / "sonnet" / "haiku" / "fable", switches the running
   session (`set_model`) without restarting it. It is not saved as Codex's
-  default model.
+  default model. The effort level picked after a model applies to the running
+  session too (`apply_flag_settings`). `resume` continues with the model and
+  effort the session last used.
+- Voice answers are spoken, as in Codex sessions. `/status` shows
+  "Permissions: Claude Code (asks before risky tools)": Codex's sandbox does
+  not apply.
 - Claude Code's permission prompts appear as Codex approvals: shell commands
   as command approvals ("Claude Code wants to run …" when spoken), edits with
   their diff, other tools as permission prompts, questions as a question form.

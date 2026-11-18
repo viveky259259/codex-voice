@@ -48,6 +48,21 @@ pub fn new_approval_decision_cell(
     decision: ReviewDecision,
     actor: ApprovalDecisionActor,
 ) -> Box<dyn HistoryCell> {
+    approval_decision_cell_for_agent(
+        subject,
+        decision,
+        actor,
+        crate::agent_backend::approval_agent_name(crate::agent_backend::is_claude_code()),
+    )
+}
+
+/// `agent` is who asked: "codex", or "Claude Code" in a Claude Code session.
+pub(crate) fn approval_decision_cell_for_agent(
+    subject: ApprovalDecisionSubject,
+    decision: ReviewDecision,
+    actor: ApprovalDecisionActor,
+    agent: &str,
+) -> Box<dyn HistoryCell> {
     use ReviewDecision::*;
     use codex_protocol::approvals::NetworkPolicyRuleAction;
 
@@ -58,7 +73,7 @@ pub fn new_approval_decision_cell(
                     vec![
                         actor.subject().into(),
                         "approved".bold(),
-                        " codex to run ".into(),
+                        Span::from(format!(" {agent} to run ")),
                         Span::from(snippet).dim(),
                         " this time".bold(),
                     ]
@@ -77,7 +92,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "approved".bold(),
-                    " codex network access to ".into(),
+                    Span::from(format!(" {agent} network access to ")),
                     Span::from(target).dim(),
                     " this time".bold(),
                 ],
@@ -92,7 +107,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "approved".bold(),
-                    " codex to always run commands that start with ".into(),
+                    Span::from(format!(" {agent} to always run commands that start with ")),
                     snippet,
                 ],
             )
@@ -103,7 +118,7 @@ pub fn new_approval_decision_cell(
                     vec![
                         actor.subject().into(),
                         "approved".bold(),
-                        " codex to run ".into(),
+                        Span::from(format!(" {agent} to run ")),
                         Span::from(snippet).dim(),
                         " every time this session".bold(),
                     ]
@@ -122,7 +137,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "approved".bold(),
-                    " codex network access to ".into(),
+                    Span::from(format!(" {agent} network access to ")),
                     Span::from(target).dim(),
                     " every time this session".bold(),
                 ],
@@ -141,7 +156,7 @@ pub fn new_approval_decision_cell(
                     vec![
                         actor.subject().into(),
                         "persisted".bold(),
-                        " Codex network access to ".into(),
+                        Span::from(format!(" {} network access to ", capitalized(agent))),
                         Span::from(target).dim(),
                     ],
                 ),
@@ -150,7 +165,7 @@ pub fn new_approval_decision_cell(
                     vec![
                         actor.subject().into(),
                         "denied".bold(),
-                        " codex network access to ".into(),
+                        Span::from(format!(" {agent} network access to ")),
                         Span::from(target).dim(),
                         " and saved that rule".into(),
                     ],
@@ -165,13 +180,13 @@ pub fn new_approval_decision_cell(
                         ApprovalDecisionActor::User => vec![
                             actor.subject().into(),
                             "did not approve".bold(),
-                            " codex to run ".into(),
+                            Span::from(format!(" {agent} to run ")),
                             snippet,
                         ],
                         ApprovalDecisionActor::Guardian => vec![
                             "Request ".into(),
                             "denied".bold(),
-                            " for codex to run ".into(),
+                            Span::from(format!(" for {agent} to run ")),
                             snippet,
                         ],
                     }
@@ -194,7 +209,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "did not approve".bold(),
-                    " codex network access to ".into(),
+                    Span::from(format!(" {agent} network access to ")),
                     Span::from(target).dim(),
                 ],
             ),
@@ -205,7 +220,7 @@ pub fn new_approval_decision_cell(
                     vec![
                         "Review ".into(),
                         "timed out".bold(),
-                        " before codex could run ".into(),
+                        Span::from(format!(" before {agent} could run ")),
                         Span::from(snippet).dim(),
                     ]
                 } else {
@@ -222,7 +237,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     "Review ".into(),
                     "timed out".bold(),
-                    " before codex could access ".into(),
+                    Span::from(format!(" before {agent} could access ")),
                     Span::from(target).dim(),
                 ],
             ),
@@ -250,7 +265,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "canceled".bold(),
-                    " the request for codex network access to ".into(),
+                    Span::from(format!(" the request for {agent} network access to ")),
                     Span::from(target).dim(),
                 ],
             ),
@@ -262,6 +277,13 @@ pub fn new_approval_decision_cell(
         symbol,
         "  ",
     ))
+}
+
+fn capitalized(agent: &str) -> String {
+    let mut chars = agent.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

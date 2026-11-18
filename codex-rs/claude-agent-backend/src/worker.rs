@@ -1,6 +1,7 @@
 //! Owns the `claude` process for the current session and answers app-server
 //! requests. One session at a time (v1): starting or resuming another thread
-//! replaces the process.
+//! replaces the process, but never while the current session has a turn
+//! running (that request is refused instead).
 
 use crate::BACKEND_NAME;
 use crate::ClaudeCodeOptions;
@@ -10,6 +11,8 @@ use crate::approvals::PendingApproval;
 use crate::mapping;
 use crate::mapping::TurnMapper;
 use crate::models;
+use crate::state::SavedSettings;
+use crate::state::SessionStore;
 use crate::wire;
 use crate::wire::Launch;
 use codex_app_server_client::AgentBackendCommand;
@@ -22,6 +25,7 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Serialize;
 use serde_json::Value;
@@ -29,7 +33,9 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -100,6 +106,10 @@ struct Worker {
     claude_code_version: Option<String>,
     /// The model the CLI uses: `None` is Claude Code's default.
     current_model: Option<String>,
+    /// The effort the CLI uses: `None` is the model's default.
+    current_effort: Option<ReasoningEffort>,
+    /// Each session's model and effort, for a resume.
+    store: SessionStore,
     waiting_model_lists: Vec<Responder>,
     init_deadline: Option<Instant>,
     next_approval: u64,
@@ -119,6 +129,8 @@ pub(crate) async fn run(
 ) {
     let mut worker = Worker {
         current_model: options.model.clone(),
+        current_effort: None,
+        store: SessionStore::new(options.state_dir.as_deref()),
         options,
         output,
         threads: Vec::new(),
@@ -268,6 +280,35 @@ impl Worker {
                 "origins": {},
                 "layers": [],
             })),
+            // The TUI loads these at startup. Claude Code has its own skills,
+            // hooks and plugins, none of them Codex's: report empty lists.
+            ClientRequest::SkillsList { params, .. } => ok(protocol::SkillsListResponse {
+                data: self
+                    .cwds(params.cwds)
+                    .into_iter()
+                    .map(|cwd| protocol::SkillsListEntry {
+                        cwd,
+                        skills: Vec::new(),
+                        errors: Vec::new(),
+                    })
+                    .collect(),
+            }),
+            ClientRequest::HooksList { params, .. } => ok(protocol::HooksListResponse {
+                data: self
+                    .cwds(params.cwds)
+                    .into_iter()
+                    .map(|cwd| protocol::HooksListEntry {
+                        cwd,
+                        hooks: Vec::new(),
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
+                    })
+                    .collect(),
+            }),
+            ClientRequest::PluginInstalled { .. } => ok(protocol::PluginInstalledResponse {
+                marketplaces: Vec::new(),
+                marketplace_load_errors: Vec::new(),
+            }),
             ClientRequest::ThreadStart { .. } => self.thread_start().await,
             ClientRequest::ThreadResume { params, .. } => self.thread_resume(params).await,
             ClientRequest::ThreadRead { params, .. } => ok(protocol::ThreadReadResponse {
@@ -327,6 +368,10 @@ impl Worker {
                 if let Some(model) = params.model.as_deref() {
                     self.switch_model(model).await?;
                 }
+                if let Some(effort) = params.effort.as_ref() {
+                    self.switch_effort(effort).await?;
+                }
+                self.save_settings();
                 ok(protocol::ThreadSettingsUpdateResponse {})
             }
             ClientRequest::TurnStart { params, .. } => self.turn_start(params).await,
@@ -386,19 +431,7 @@ impl Worker {
     /// `/model`, a spoken "switch to opus", or a turn's model: `set_model` on the
     /// running CLI, else the `--model` of the next process.
     async fn switch_model(&mut self, requested: &str) -> Result<(), JSONRPCErrorError> {
-        let models = self.merged_models();
-        let model = if requested == models::DEFAULT_MODEL {
-            None
-        } else if let Some(model) = models::resolve(&models, requested) {
-            Some(model.id.clone())
-        } else if models::is_claude_model_id(requested) {
-            Some(requested.to_string())
-        } else {
-            return Err(error(
-                INVALID_PARAMS,
-                format!("{requested} is not a Claude model."),
-            ));
-        };
+        let model = self.model_for(requested)?;
         if model == self.current_model {
             return Ok(());
         }
@@ -417,6 +450,103 @@ impl Worker {
             })?;
         }
         self.current_model = model;
+        Ok(())
+    }
+
+    /// The `--model` / `set_model` value for a requested model or family name.
+    fn model_for(&self, requested: &str) -> Result<Option<String>, JSONRPCErrorError> {
+        let models = self.merged_models();
+        if requested == models::DEFAULT_MODEL {
+            Ok(None)
+        } else if let Some(model) = models::resolve(&models, requested) {
+            Ok(Some(model.id.clone()))
+        } else if models::is_claude_model_id(requested) {
+            Ok(Some(requested.to_string()))
+        } else {
+            Err(error(
+                INVALID_PARAMS,
+                format!("{requested} is not a Claude model."),
+            ))
+        }
+    }
+
+    /// The effort picker or a turn's effort: `apply_flag_settings` with
+    /// `effortLevel` on the running CLI (the SDK's `applyFlagSettings`), else
+    /// the `--effort` of the next process.
+    async fn switch_effort(&mut self, effort: &ReasoningEffort) -> Result<(), JSONRPCErrorError> {
+        let Some(level) = models::claude_effort(effort) else {
+            // Not a level the picker offers for Claude models: nothing to apply.
+            tracing::debug!(%effort, "ignoring an effort Claude Code has no level for");
+            return Ok(());
+        };
+        if self.current_effort.as_ref() == Some(effort) {
+            return Ok(());
+        }
+        if let Some(session) = self.session.as_mut() {
+            let id = control_id(session);
+            write_line(
+                &mut session.stdin,
+                &wire::control_request(&id, wire::set_effort_request(Some(level))),
+            )
+            .await
+            .map_err(|err| {
+                error(
+                    SERVER_ERROR,
+                    format!("Could not change the {BACKEND_NAME} effort: {err}"),
+                )
+            })?;
+        }
+        self.current_effort = Some(effort.clone());
+        Ok(())
+    }
+
+    fn effort_level(&self) -> Option<&'static str> {
+        self.current_effort.as_ref().and_then(models::claude_effort)
+    }
+
+    /// Remembers the adopted session's model and effort for a later resume.
+    fn save_settings(&self) {
+        let Some(session) = self.session.as_ref().filter(|session| session.adopted) else {
+            return;
+        };
+        self.store.put(
+            &session.thread_id,
+            SavedSettings {
+                model: self.current_model.clone(),
+                effort: self.effort_level().map(str::to_string),
+                updated_at: now_s(),
+            },
+        );
+    }
+
+    /// Restores a session's saved model and effort before it is resumed.
+    fn restore_settings(&mut self, thread_id: &str) {
+        let Some(saved) = self.store.get(thread_id) else {
+            return;
+        };
+        self.current_model = saved.model;
+        self.current_effort = saved
+            .effort
+            .as_deref()
+            .and_then(|effort| ReasoningEffort::from_str(effort).ok());
+    }
+
+    /// A request that would replace the process while a turn runs is refused:
+    /// stopping the `claude` process would stop that turn.
+    fn refuse_if_busy(&self, thread_id: Option<&str>) -> Result<(), JSONRPCErrorError> {
+        let busy = self.session.as_ref().is_some_and(|session| {
+            session.adopted
+                && session.turn.is_some()
+                && thread_id.is_none_or(|thread_id| thread_id != session.thread_id)
+        });
+        if busy {
+            return Err(error(
+                INVALID_PARAMS,
+                format!(
+                    "{BACKEND_NAME} is still working in this session. Wait for it or stop it (Esc), then try again."
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -452,7 +582,7 @@ impl Worker {
             history_mode: protocol::ThreadHistoryMode::Legacy,
             model_provider: MODEL_PROVIDER.to_string(),
             model: Some(self.model_label()),
-            reasoning_effort: None,
+            reasoning_effort: self.current_effort.clone(),
             created_at: info.map_or(now, |info| info.created_at),
             updated_at: info.map_or(now, |info| info.updated_at),
             recency_at: None,
@@ -479,6 +609,15 @@ impl Worker {
             .unwrap_or_else(|| models::DEFAULT_MODEL.to_string())
     }
 
+    /// The requested working directories, or the session's.
+    fn cwds(&self, requested: Vec<PathBuf>) -> Vec<PathBuf> {
+        if requested.is_empty() {
+            vec![self.options.cwd.clone()]
+        } else {
+            requested
+        }
+    }
+
     fn cwd(&self) -> AbsolutePathBuf {
         AbsolutePathBuf::from_absolute_path(&self.options.cwd)
             .or_else(|_| AbsolutePathBuf::current_dir())
@@ -500,6 +639,9 @@ impl Worker {
     }
 
     async fn thread_start(&mut self) -> RequestResult {
+        // A second thread/start (a hidden title or helper thread, `/new`)
+        // would replace the process and stop the running turn. Refuse it.
+        self.refuse_if_busy(/*thread_id*/ None)?;
         let reuse = self
             .session
             .as_ref()
@@ -532,7 +674,7 @@ impl Worker {
             approvals_reviewer: protocol::ApprovalsReviewer::User,
             sandbox: external_sandbox(),
             active_permission_profile: None,
-            reasoning_effort: None,
+            reasoning_effort: self.current_effort.clone(),
             multi_agent_mode: Default::default(),
         };
         self.notify(ServerNotification::ThreadStarted(
@@ -554,6 +696,16 @@ impl Worker {
             .as_ref()
             .is_some_and(|session| session.thread_id == thread_id);
         if !loaded {
+            self.refuse_if_busy(Some(&thread_id))?;
+            // The model in use before quitting, unless the resume names one.
+            self.restore_settings(&thread_id);
+            if let Some(model) = params
+                .model
+                .as_deref()
+                .filter(|model| models::is_claude_model_id(model))
+            {
+                self.current_model = self.model_for(model)?;
+            }
             self.spawn(Launch::Resume {
                 session_id: thread_id.clone(),
             })
@@ -584,7 +736,7 @@ impl Worker {
             approvals_reviewer: protocol::ApprovalsReviewer::User,
             sandbox: external_sandbox(),
             active_permission_profile: None,
-            reasoning_effort: None,
+            reasoning_effort: self.current_effort.clone(),
             collaboration_mode: None,
             multi_agent_mode: Default::default(),
             initial_turns_page: None,
@@ -624,6 +776,7 @@ impl Worker {
                     format!("Start or resume this {BACKEND_NAME} session first."),
                 ));
             }
+            self.refuse_if_busy(Some(&thread_id))?;
             // The process exited since: continue the same session.
             let launch = if self.session_saved(&thread_id) {
                 Launch::Resume {
@@ -659,6 +812,13 @@ impl Worker {
                 tracing::debug!(message = err.message, "ignoring the turn's model");
             }
         }
+        // The level shown in the footer is the one the turn carries: apply it.
+        if let Some(effort) = params.effort.as_ref()
+            && let Err(err) = self.switch_effort(effort).await
+        {
+            tracing::debug!(message = err.message, "ignoring the turn's effort");
+        }
+        self.save_settings();
         let Some(session) = self.session.as_mut() else {
             return Err(error(
                 SERVER_ERROR,
@@ -826,6 +986,15 @@ impl Worker {
         } else {
             (protocol::TurnStatus::Completed, None)
         };
+        // As the Codex app server does: a completed turn carries its final
+        // agent message (the TUI speaks and records it from here); other
+        // turns carry no items.
+        let (items, items_view) = match turn.mapper.last_agent_message() {
+            Some(item) if status == protocol::TurnStatus::Completed => {
+                (vec![item.clone()], protocol::TurnItemsView::Summary)
+            }
+            _ => (Vec::new(), protocol::TurnItemsView::NotLoaded),
+        };
         let completed_at = now_s();
         notifications.push(ServerNotification::TurnCompleted(
             protocol::TurnCompletedNotification {
@@ -833,8 +1002,8 @@ impl Worker {
                 turn: protocol::Turn {
                     id: turn_id,
                     root_turn_id: None,
-                    items: Vec::new(),
-                    items_view: Default::default(),
+                    items,
+                    items_view,
                     status,
                     error: turn_error,
                     started_at: Some(turn.started_at),
@@ -980,7 +1149,11 @@ impl Worker {
         self.stop_session().await;
         let mut command = Command::new(&self.options.claude_bin);
         command
-            .args(wire::claude_args(self.current_model.as_deref(), &launch))
+            .args(wire::claude_args(
+                self.current_model.as_deref(),
+                self.effort_level(),
+                &launch,
+            ))
             .current_dir(&self.options.cwd)
             .envs(self.options.env.iter().cloned())
             .stdin(Stdio::piped())

@@ -11,6 +11,7 @@ fn strings(args: Vec<OsString>) -> Vec<String> {
 fn new_session_argv_matches_the_sdk() {
     let args = strings(claude_args(
         Some("claude-opus-5-5"),
+        Some("high"),
         &Launch::New {
             session_id: "11111111-1111-4111-8111-111111111111".into(),
         },
@@ -25,6 +26,7 @@ fn new_session_argv_matches_the_sdk() {
             "stream-json",
             "--thinking=adaptive",
             "--thinking-display=summarized",
+            "--effort=high",
             "--model=claude-opus-5-5",
             "--permission-prompt-tool=stdio",
             "--permission-mode=default",
@@ -40,12 +42,14 @@ fn new_session_argv_matches_the_sdk() {
 fn resume_argv_names_the_session_and_omits_a_default_model() {
     let args = strings(claude_args(
         /*model*/ None,
+        /*effort*/ None,
         &Launch::Resume {
             session_id: "22222222-2222-4222-8222-222222222222".into(),
         },
     ));
     assert!(args.contains(&"--resume=22222222-2222-4222-8222-222222222222".to_string()));
     assert!(!args.iter().any(|arg| arg.starts_with("--model")));
+    assert!(!args.iter().any(|arg| arg.starts_with("--effort")));
     assert!(!args.iter().any(|arg| arg.starts_with("--session-id")));
 }
 
@@ -62,6 +66,10 @@ fn control_messages_have_the_sdk_shape() {
     assert_eq!(
         set_model_request(/*model*/ None),
         json!({ "subtype": "set_model", "model": null })
+    );
+    assert_eq!(
+        set_effort_request(Some("max")),
+        json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": "max" } })
     );
     assert_eq!(
         control_request("r2", interrupt_request()),
