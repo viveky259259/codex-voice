@@ -34,6 +34,14 @@ pub struct VadConfig {
     pub pre_roll_ms: u32,
     /// Lowest noise floor, as RMS on the i16 scale.
     pub min_noise_floor: f32,
+    /// The floor follows a low percentile of the levels over this window, in
+    /// every state, including during speech. A steady rise in background
+    /// noise then raises the floor, and the utterance ends instead of running
+    /// to `max_utterance_ms`. Pauses between words keep speech itself from
+    /// raising it.
+    pub noise_window_ms: u32,
+    /// The percentile (0.0..1.0) of the window taken as background.
+    pub noise_percentile: f32,
 }
 
 impl Default for VadConfig {
@@ -47,6 +55,8 @@ impl Default for VadConfig {
             max_utterance_ms: 30_000,
             pre_roll_ms: 300,
             min_noise_floor: 60.0,
+            noise_window_ms: 4000,
+            noise_percentile: 0.1,
         }
     }
 }
@@ -95,6 +105,9 @@ pub struct Vad {
     frame_len: usize,
     floor: f32,
     calibration: Vec<f32>,
+    /// Recent frame levels, for the background percentile.
+    levels: VecDeque<f32>,
+    levels_cap: usize,
     pending: Vec<i16>,
     pre_roll: VecDeque<i16>,
     pre_roll_len: usize,
@@ -107,11 +120,14 @@ impl Vad {
         let frame_len = ms_to_samples(config.frame_ms.max(5));
         let pre_roll_len = ms_to_samples(config.pre_roll_ms);
         let floor = config.min_noise_floor.max(1.0);
+        let levels_cap = (config.noise_window_ms / config.frame_ms.max(5)).max(1) as usize;
         Self {
             config,
             frame_len,
             floor,
             calibration: Vec::new(),
+            levels: VecDeque::with_capacity(levels_cap),
+            levels_cap,
             pending: Vec::new(),
             pre_roll: VecDeque::with_capacity(pre_roll_len),
             pre_roll_len,
@@ -183,6 +199,13 @@ impl Vad {
 
     fn process_frame(&mut self, frame: &[i16], events: &mut Vec<VadEvent>) {
         let level = rms(frame);
+        self.track_background(level);
+        tracing::trace!(
+            level_db = ratio_to_db(level),
+            floor_db = ratio_to_db(self.floor),
+            state = ?self.state,
+            "vad frame"
+        );
         if self.calibration.len() < CALIBRATION_FRAMES as usize {
             self.calibration.push(level);
             let mean = self.calibration.iter().sum::<f32>() / self.calibration.len() as f32;
@@ -274,6 +297,34 @@ impl Vad {
             voiced_ms: self.frames_to_ms(last_loud_frame),
             truncated,
         }));
+    }
+
+    /// Records `level` and raises the floor to the window's low percentile
+    /// once the window is full and the current frame is at that background.
+    /// Only raises: falling is `adapt_floor`'s job.
+    fn track_background(&mut self, level: f32) {
+        if self.levels.len() == self.levels_cap {
+            self.levels.pop_front();
+        }
+        self.levels.push_back(level);
+        if self.levels.len() < self.levels_cap {
+            return;
+        }
+        let mut sorted: Vec<f32> = self.levels.iter().copied().collect();
+        let percentile = self.config.noise_percentile.clamp(0.0, 1.0);
+        let index = ((sorted.len() - 1) as f32 * percentile).round() as usize;
+        let (_, background, _) = sorted.select_nth_unstable_by(index, f32::total_cmp);
+        // Raise only while the noise is still there: when it stops, the window
+        // is still full of loud frames, and raising then would deafen the VAD
+        // for a whole window. `adapt_floor` brings the floor back down.
+        if *background > self.floor && level >= *background * 0.5 {
+            tracing::debug!(
+                from_db = ratio_to_db(self.floor),
+                to_db = ratio_to_db(*background),
+                "vad: background noise rose, raising the floor"
+            );
+            self.floor = *background;
+        }
     }
 
     fn adapt_floor(&mut self, level: f32) {
@@ -382,6 +433,11 @@ pub fn rms(samples: &[i16]) -> f32 {
         })
         .sum();
     (sum / samples.len() as f64).sqrt() as f32
+}
+
+/// An i16-scale RMS level as dBFS, for logs.
+pub fn ratio_to_db(level: f32) -> f32 {
+    20.0 * (level.max(1e-3) / f32::from(i16::MAX)).log10()
 }
 
 pub fn db_to_ratio(db: f32) -> f32 {

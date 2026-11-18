@@ -109,7 +109,7 @@ impl Default for CommandSttConfig {
                 "mlx_whisper",
                 "{wav}",
                 "--model",
-                "mlx-community/whisper-base-mlx",
+                "mlx-community/whisper-large-v3-turbo",
                 "--output-format",
                 "txt",
                 "--output-dir",

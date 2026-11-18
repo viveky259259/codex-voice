@@ -112,7 +112,9 @@ fn max_length_cuts_the_utterance() {
     assert!(found[0].truncated);
     assert_eq!(found[0].duration_ms(), 2000);
     assert!(starts(&events) >= 2);
-    assert!(!found.last().unwrap().truncated);
+    // A steady, unmodulated tone this long counts as background: the floor
+    // rises to it, so no further utterance starts on it before it ends.
+    assert!(!vad.in_speech());
 }
 
 #[test]
@@ -158,4 +160,85 @@ fn barge_in_needs_sustained_loud_audio() {
     assert_eq!(detector.push(&silence(100, 15), 60.0), None);
     let audio = detector.push(&tone(400, 9000.0), 60.0).unwrap();
     assert!(samples_to_ms(audio.len()) >= 300);
+}
+
+/// Steady broadband noise: uniform random samples in ±amplitude.
+fn noise(ms: u32, amplitude: i16, seed: u32) -> Vec<i16> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    let span = (amplitude as u32) * 2 + 1;
+    (0..ms_to_samples(ms))
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((state >> 8) % span) as i16 - amplitude
+        })
+        .collect()
+}
+
+#[test]
+fn a_step_up_in_steady_noise_ends_the_utterance_instead_of_running_to_max() {
+    // Calibrates on near-digital silence (a virtual mic warming up), then the
+    // room's steady noise arrives well above that floor and never stops.
+    let mut input = silence(500, 20);
+    input.extend(noise(12_000, 1500, 21));
+    let mut vad = Vad::new(VadConfig::default());
+    let events = run(&mut vad, &input);
+
+    let found = utterances(&events);
+    assert_eq!(found.len(), 1, "{} utterances", found.len());
+    assert!(!found[0].truncated, "ran to max_utterance_ms");
+    assert!(
+        found[0].duration_ms() <= 6_000,
+        "ended after {} ms",
+        found[0].duration_ms()
+    );
+    // The floor now sits at the noise, so it doesn't restart on it.
+    assert_eq!(starts(&events), 1);
+    assert!(!vad.in_speech());
+
+    // Speech over the noise is still detected and ends normally.
+    let mut speech = tone(1000, 12_000.0);
+    speech.extend(noise(1500, 1500, 22));
+    let events = run(&mut vad, &speech);
+    assert_eq!(starts(&events), 1);
+    assert_eq!(utterances(&events).len(), 1);
+    assert!(!utterances(&events)[0].truncated);
+}
+
+#[test]
+fn long_speech_with_pauses_between_words_is_not_cut_by_the_floor() {
+    // 8 s of "words" (250 ms loud, 150 ms quiet): pauses are shorter than
+    // end_silence_ms, and frequent enough to keep the floor at background.
+    let mut input = silence(600, 23);
+    for index in 0..20 {
+        input.extend(tone(250, 7000.0));
+        input.extend(silence(150, 30 + index));
+    }
+    input.extend(silence(1200, 60));
+    let mut vad = Vad::new(VadConfig::default());
+    let events = run(&mut vad, &input);
+    assert_eq!(starts(&events), 1);
+    let found = utterances(&events);
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0].voiced_ms >= 7_500,
+        "voiced {} ms",
+        found[0].voiced_ms
+    );
+}
+
+#[test]
+fn quiet_speech_right_after_loud_noise_stops_is_still_heard() {
+    // 6 s of loud steady noise (the floor rises to it), then the noise stops
+    // and a quiet speaker talks within a second.
+    let mut input = silence(500, 70);
+    input.extend(noise(6_000, 3000, 71));
+    input.extend(silence(800, 72));
+    let mut vad = Vad::new(VadConfig::default());
+    run(&mut vad, &input);
+
+    let mut speech = tone(800, 1500.0);
+    speech.extend(silence(1200, 73));
+    let events = run(&mut vad, &speech);
+    assert_eq!(starts(&events), 1, "floor {}", vad.noise_floor());
+    assert_eq!(utterances(&events).len(), 1);
 }

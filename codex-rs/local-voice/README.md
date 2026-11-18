@@ -86,7 +86,7 @@ device = "0"   # ffmpeg -f avfoundation -i :0 -ac 1 -ar 16000 -f s16le -
 
 [stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 timeout_ms = 60000
 
@@ -144,7 +144,7 @@ checked on a Mac against the real server (see issue #12). List the tools with
 backend = "mcp"
 url = "http://127.0.0.1:5051/mcp"
 tool = "submit_inference"
-arguments = { model_id = "hf:mlx-community/whisper-base-mlx", input_path = "{wav}", options = { language = "en" } }
+arguments = { model_id = "hf:mlx-community/whisper-large-v3-turbo", input_path = "{wav}", options = { language = "en" } }
 
 [stt.job]
 tool = "get_job"
