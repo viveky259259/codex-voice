@@ -188,6 +188,10 @@ pub struct Candidate {
     pub id: String,
     /// Speakable label, for example "build on desktop".
     pub label: String,
+    /// For agent candidates, the machine the agent runs on. Thread ids are
+    /// only unique per machine, so a choice is resolved by id and machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// Read separators and camelCase humps in names as spaces: "mac-studio" and

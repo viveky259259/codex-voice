@@ -12,7 +12,7 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 | Voice-first TUI: auto-start, spoken approvals with confirmation, spoken status | `codex-rs/tui` | Tested (no-audio harness). Live audio: verify on a Mac. |
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
 | Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Not wired into the TUI yet. |
-| Orchestration engine: agents across machines | `codex-rs/orchestrator` | In progress. |
+| Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator` | Tested with a fake backend. App-server backend and TUI wiring: next, on the Mac. |
 | `codex remote list` / `codex remote attach` (Tailscale + SSH) | `codex-rs/tailnet`, `app-server-client`, `cli` | On `wip`: transport tested, CLI not yet compiled. |
 
 Branches: `codex-voice` holds tested work; `wip` adds work still being tested
