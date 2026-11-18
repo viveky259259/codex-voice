@@ -143,7 +143,8 @@ result (or `BackendError::Unreachable` / `Connecting`), and reports `link()`.
 - Each configured machine: `RemoteLink`, which connects
   `RemoteAppServerClient` with `RemoteAppServerEndpoint::Ssh` (Lane C: `ssh
   HOST -- codex app-server daemon start`, then `ssh HOST -- codex app-server
-  proxy`), with `required_human_approval: false`. It connects on its own task
+  proxy`). In the TUI it also forwards approvals (below), with
+  `required_human_approval: true`. It connects on its own task
   when voice starts (or on first use), waits at most 1.5 s per call before
   answering `Connecting` (below the engine's 3 s timeout, so a slow handshake
   is "connecting", not "down"), keeps the connection, drains its
@@ -162,6 +163,41 @@ result (or `BackendError::Unreachable` / `Connecting`), and reports `link()`.
 
 Map app-server errors: transport/connection failures → `Unreachable`, an
 unknown thread id → `AgentNotFound`, anything else → `Request`.
+
+### Remote approvals
+
+Approval requests from agents on configured machines are answered from this
+TUI (`tui/src/app/voice_remote_approvals.rs`). The engine is not involved:
+`AppServerTransport::watch_threads(&agents)` is called after every
+`list_agents`; this machine's transport ignores it (its threads already reach
+the TUI's own approval flow), and a `RemoteLink` subscribes its connection to
+each listed thread it does not yet watch, and to every agent it lists right
+after connecting.
+
+- Subscribing: `thread/resume { threadId, excludeTurns: true }` with no
+  overrides is the only request that subscribes a connection to an existing
+  loaded thread without starting work (`thread/start`, `thread/fork` and
+  `thread/revert` subscribe to the thread they create or rewrite; realtime
+  start and guardian review attach while starting work; `thread/read` never
+  subscribes). On a running thread it sends no history, re-sends the
+  thread's pending requests to the new subscriber, records this connection's
+  client name on the thread (`set_app_server_client_info`), and keeps the
+  thread loaded while subscribed. If the thread was unloaded between the list
+  and the resume, the resume loads it again.
+- Eligibility: plain exec, file-change and permissions approvals go to every
+  subscribed connection. `humanCommand` exec checkpoints only go to
+  connections that initialized with `requiredHumanApproval` and
+  `experimentalApi`; the link sets both.
+- The link forwards `item/commandExecution/requestApproval`,
+  `item/fileChange/requestApproval` and `item/permissions/requestApproval`
+  from watched threads, `serverRequest/resolved`, `turn/completed`, and its
+  disconnect as `AppEvent::RemoteApproval`. It answers nothing itself; other
+  server requests stay with the machine's own clients.
+- The app shows each request in the usual approval overlay, labeled
+  "devbox · build", under a local alias thread id per (machine, thread), and
+  keys it by (machine, request id). An answer to an alias goes back on the
+  originating connection as the JSON-RPC response; it never reaches this
+  machine's app server.
 
 ### Where `execute` is called in the voice flow
 
@@ -196,9 +232,9 @@ engine in place of hand-written command handling:
 
 - Tested against fake app servers (in-memory, WebSocket, and over a fake
   `ssh`), never a real remote host.
-- A remote server's requests to the orchestrator's connection (approvals)
-  are never answered; with `required_human_approval: false` they are not
-  expected to be routed there, but this is unverified.
+- Remote approvals have not been tried against a real remote app server:
+  the subscribe and replay behavior above is read from the app-server code
+  and exercised against a fake server over a fake `ssh`.
 - Agents are matched by thread id; two machines with the same thread id
   (forks of one rollout) would confuse `resolve_choice`, which looks agents
   up by id alone.

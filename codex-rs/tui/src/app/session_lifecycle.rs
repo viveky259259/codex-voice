@@ -1007,6 +1007,8 @@ impl App {
             AppEvent::ResetTranscriptForThreadSwitch
         });
         self.replay_thread_snapshot(snapshot, resume_restored_queue);
+        // Prompts from other machines belong to no thread here; keep them up.
+        self.resurface_remote_approvals();
         self.app_event_tx
             .send(AppEvent::RestoreBackgroundTerminals(thread_id));
         if let Some(thread_id) = self.chat_widget.thread_id()

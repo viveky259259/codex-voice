@@ -72,6 +72,24 @@ pub(crate) fn start_voice_attempt_for_test(
     chat.realtime_conversation.phase = RealtimeConversationPhase::Starting;
 }
 
+/// A final user transcript, delivered as the realtime API delivers it.
+pub(crate) fn say_for_test(chat: &mut ChatWidget, text: &str) {
+    chat.on_realtime_transcript_delta("user".to_string(), text.to_string());
+    chat.on_realtime_transcript_done("user".to_string(), text.to_string());
+}
+
+/// The visible approval prompt's thread id and label.
+pub(crate) fn visible_approval_for_test(chat: &ChatWidget) -> Option<(ThreadId, Option<String>)> {
+    chat.bottom_pane.current_approval_request().map(|request| {
+        (
+            request.thread_id(),
+            request
+                .remote_origin()
+                .map(|(machine, agent)| format!("{machine} · {agent}")),
+        )
+    })
+}
+
 pub(crate) fn activate_voice_for_thread(chat: &mut ChatWidget, thread_id: ThreadId) {
     chat.thread_id = Some(thread_id);
     chat.realtime_conversation.phase = RealtimeConversationPhase::Active;

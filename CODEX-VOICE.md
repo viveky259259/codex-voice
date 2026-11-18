@@ -13,6 +13,7 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
 | Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Wired into the TUI. |
 | Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator`, `codex-rs/tui/src/app/voice_command*.rs` | Wired into the TUI for this machine's agents and for the machines in `[realtime] voice_machines` (over SSH). Tested against fake app servers and a fake `ssh`; not yet with a real remote host or a live voice session. |
+| Approvals from agents on other machines, by voice or keyboard | `codex-rs/tui/src/app/voice_remote_approvals.rs`, `voice_command_remote.rs` | Tested against fake app servers and a fake `ssh`; not yet with a real remote host. |
 | `codex remote list` / `codex remote attach` (Tailscale + SSH) | `codex-rs/tailnet`, `app-server-client`, `cli` | Tested on macOS with fake ssh/tailscale against a real local server. Real tailnet: not yet. |
 
 Branches: `codex-voice` holds tested work; `wip` adds work still being tested
@@ -110,6 +111,34 @@ not on the remote non-interactive `PATH`. Machines are named in speech by
 - "tell build to run the tests" asks "Tell build on devbox: run the tests. Say
   confirm." Steer and stop on another machine always wait for "confirm".
 - When the voice orchestrator stops, its SSH children are killed.
+
+### Approvals from other machines
+
+When an agent on a configured machine asks for approval, the prompt opens in
+this TUI, in the same approval overlay as local prompts, labeled with machine
+and agent ("devbox · build"). Answer it with the keyboard as usual, or by voice:
+
+| You hear / say | Effect |
+|---|---|
+| "Build on devbox wants to run cargo test. Say approve or deny." | The prompt is open. |
+| "approve" | "Approve cargo test for build on devbox? Say confirm." |
+| "confirm" | The approval goes back to devbox, over its SSH connection. |
+| "deny", "no" | Denied at once, on devbox. |
+
+- Each machine's connection listens to the agents it lists (when it connects
+  and on every "what's running") with `thread/resume`, without history or
+  setting overrides; requests already waiting there are shown when it
+  subscribes. Agents started on that machine later are picked up on the next
+  "what's running". This machine's agents are not subscribed twice.
+- Answered at the machine itself (or by another client), or its turn ended:
+  the prompt here closes, and a half-said "approve" is dropped.
+- Connection lost: its prompts close and Codex says "Lost devbox; its approval
+  is still waiting there." If an answer cannot be sent: "Couldn't reach
+  devbox; the approval is still waiting there." Nothing is ever answered
+  automatically; the request keeps waiting on that machine.
+- Only machines in `voice_machines` are listened to. A remote file edit
+  prompt shows no diff (it stays on that machine) and is spoken as "edit
+  files".
 
 ## Claude models
 
