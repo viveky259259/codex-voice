@@ -1441,6 +1441,9 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         result: Box<VoiceCommandResult>,
     },
+    /// An approval request, or its withdrawal, from an agent on a machine in
+    /// `[realtime] voice_machines`.
+    RemoteApproval(Box<crate::app::voice_remote_approvals::RemoteApprovalEvent>),
     RealtimeConversationStateChanged,
     RealtimeSessionLockStopped {
         thread_id: ThreadId,

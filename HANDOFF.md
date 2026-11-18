@@ -39,6 +39,28 @@ host, a live voice session.
 Mac checks: add a reachable host to `voice_machines`, start voice, say "what's
 running", "list my machines", then steer and stop an agent there.
 
+## Remote approvals by voice (wip)
+Approval requests from agents on `voice_machines` hosts open in this TUI's
+approval overlay, labeled "devbox · build", and are answered by keyboard or
+voice ("Build on devbox wants to run cargo test. Say approve or deny." →
+"approve" → "Approve cargo test for build on devbox? Say confirm." →
+"confirm"). Code: `tui/src/app/voice_remote_approvals.rs` (registry keyed by
+(machine, request id), alias thread ids, answer routing in
+`submit_thread_op`), `voice_command_remote.rs` (subscribe with
+`thread/resume { excludeTurns }`, forward requests / `serverRequest/resolved`
+/ `turn/completed` / disconnect). Tested in the cloud: conversion, routing,
+App flow over fake WebSocket servers, widget voice flow, and one request over
+the fake `ssh` (`cargo test -p codex-tui --lib -- remote_approval
+remote_prompt answers_are_routed requests_from_unlisted machine_over_ssh
+answer_that_cannot`). Not yet: a real remote host. Side effects of the
+subscribe (from reading app-server code): the remote thread records this
+connection's client name and stays loaded while subscribed.
+
+Mac checks: with a `voice_machines` host, start an agent there that needs an
+approval (e.g. `approval_policy = "untrusted"`), start voice here, say
+"what's running", wait for "… on devbox wants to …", say "approve", then
+"confirm"; also answer one at the remote and check the prompt here closes.
+
 ## On wip only (untested)
 - `035f3f0`-equivalent fix commit "Voice approvals: apply each spoken answer
   once" (review findings 1–4). Run the codex-tui realtime/approval/voice tests.
@@ -70,7 +92,7 @@ to clone the v8 Chromium submodule (abseil-cpp) on the Mac; the git CLI works.
 ## Lane status
 | Lane | Where | Status |
 |---|---|---|
-| D: Voice orchestration across machines | `codex-rs/orchestrator/`, `tui/src/app/voice_command*.rs`, `config/src/config_toml.rs` (`voice_machines`) | On `wip`. Fake-ssh integration tests pass in the cloud; real remote host not yet tried. |
+| D: Voice orchestration across machines | `codex-rs/orchestrator/`, `tui/src/app/voice_command*.rs`, `tui/src/app/voice_remote_approvals*.rs`, `config/src/config_toml.rs` (`voice_machines`) | On `wip`. Includes remote approvals by voice. Fake-ssh integration tests pass in the cloud; real remote host not yet tried. |
 | B: Claude models | `codex-rs/anthropic-proxy/` | Committed. 27 tests pass vs a mock Anthropic server. Not run against the real API. Drafted-but-not-added test that feeds proxy output through `codex_api::spawn_response_stream` (needs dev-deps codex-api, codex-client, codex-protocol, futures). README has config + mapping table. |
 | A: Voice-first TUI | `codex-rs/tui/` (+ `config/src/config_toml.rs`, `core/src/config/*`, `core/config.schema.json`) | Committed. 362 realtime/approval/voice TUI tests pass incl. 30 new (2 failed only on disk-full); codex-config 418 pass. The stack overflows were from not setting `RUST_MIN_STACK=8388608` (upstream always does). `cargo test -p codex-core config` not yet run. |
 | C: Tailscale/SSH remote | `codex-rs/tailnet/`, `codex-rs/app-server-client/` (`ssh.rs`, `remote*.rs`, `tests/ssh_remote.rs`), `codex-rs/cli/` (`remote_cmd.rs`, `remote_cmd_tests.rs`, `tests/remote_ssh.rs`, `main.rs`, `Cargo.toml`), small edits in `tui/src/app/exit_summary.rs`, `tui/src/status/remote_connection.rs` | On `wip` only. Passed: codex-tailnet tests; app-server-client lib 69; `ssh_remote` integration 3 (fake `ssh` → real local app-server). NOT compiled: the `cli/` parts (`codex remote list` / `attach`). Adds `ssh://host` remote endpoint (runs `ssh host -- codex app-server proxy`). |

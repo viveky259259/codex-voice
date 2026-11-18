@@ -703,3 +703,105 @@ async fn a_refusal_that_cannot_apply_says_so() {
         vec!["That option is no longer available.".to_string()]
     );
 }
+
+/// A command approval from `build` on `devbox`, shown under a local alias.
+fn remote_exec_approval(alias: ThreadId, id: &str, command: &str) -> ApprovalRequest {
+    let ApprovalRequest::Exec(mut request) = exec_approval(alias, id, command, &ALL_DECISIONS)
+    else {
+        unreachable!("exec_approval builds an exec request");
+    };
+    request.thread_label = Some(crate::bottom_pane::remote_thread_label("devbox", "build"));
+    ApprovalRequest::Exec(request)
+}
+
+#[tokio::test]
+async fn a_remote_approval_names_its_machine_and_needs_confirm() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    activate_voice(&mut chat);
+    let alias = ThreadId::new();
+
+    chat.push_approval_request(remote_exec_approval(alias, "exec-1", "cargo test"));
+    assert_eq!(
+        spoken(&mut ops),
+        vec!["Build on devbox wants to run cargo test. Say approve or deny.".to_string()]
+    );
+
+    say(&mut chat, "approve");
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert!(submitted.is_empty(), "{submitted:?}");
+    assert_eq!(
+        spoken(&mut ops),
+        vec!["Approve cargo test for build on devbox? Say confirm.".to_string()]
+    );
+
+    say(&mut chat, "confirm");
+    let mut submitted = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AppEvent::SubmitThreadOp { thread_id, op } = event {
+            submitted.push((thread_id, op));
+        }
+    }
+    assert_eq!(
+        submitted
+            .iter()
+            .map(|(thread_id, op)| (*thread_id, exec_decision(op)))
+            .collect::<Vec<_>>(),
+        vec![(
+            alias,
+            Some(("exec-1", &CommandExecutionApprovalDecision::Accept))
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_remote_denial_applies_at_once() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    activate_voice(&mut chat);
+    chat.push_approval_request(remote_exec_approval(ThreadId::new(), "exec-1", "rm -rf target"));
+    spoken(&mut ops);
+
+    say(&mut chat, "deny");
+
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert_eq!(
+        submitted
+            .iter()
+            .filter_map(exec_decision)
+            .collect::<Vec<_>>(),
+        vec![("exec-1", &CommandExecutionApprovalDecision::Decline)]
+    );
+    assert_eq!(spoken(&mut ops), vec!["Denied.".to_string()]);
+}
+
+#[tokio::test]
+async fn an_approval_answered_elsewhere_cancels_its_pending_confirm() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    activate_voice(&mut chat);
+    let alias = ThreadId::new();
+    chat.push_approval_request(remote_exec_approval(alias, "exec-1", "cargo test"));
+    chat.push_approval_request(remote_exec_approval(alias, "exec-2", "cargo build"));
+    say(&mut chat, "approve");
+    drain_events(&mut chat, &mut events);
+    spoken(&mut ops);
+
+    // Someone at devbox answered the first prompt; the second shows and is said.
+    chat.dismiss_app_server_request(
+        &crate::app::app_server_requests::ResolvedAppServerRequest::ExecApproval {
+            thread_id: alias.to_string(),
+            id: "exec-1".to_string(),
+        },
+    );
+    assert_eq!(
+        spoken(&mut ops),
+        vec!["Build on devbox wants to run cargo build. Say approve or deny.".to_string()]
+    );
+
+    // The "approve" said for the first prompt cannot be confirmed onto the second.
+    say(&mut chat, "confirm");
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert!(submitted.is_empty(), "{submitted:?}");
+    assert_eq!(
+        spoken(&mut ops),
+        vec!["Say approve first, then confirm.".to_string()]
+    );
+}

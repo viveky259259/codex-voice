@@ -601,6 +601,11 @@ impl App {
         thread_id: ThreadId,
         op: AppCommand,
     ) -> Result<()> {
+        // An answer to an agent on another machine goes back over its own
+        // connection, never to this machine's app server.
+        if self.try_answer_remote_approval(thread_id, &op).await {
+            return Ok(());
+        }
         if self.thread_unavailable(thread_id) {
             if let AppCommand::RealtimeConversationSpeech { delivery_id, .. } = &op {
                 self.chat_widget

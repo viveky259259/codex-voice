@@ -21,10 +21,25 @@
 //!
 //! Only configured machines ever get a link: discovered machines are names
 //! for "list my machines", never SSH targets.
+//!
+//! Approvals (`voice_remote_approvals`): a link that forwards approvals
+//! listens to its machine's agents. Once connected, and after every agent
+//! snapshot, it subscribes to each listed thread it is not yet listening to
+//! with `thread/resume` (`excludeTurns`, no overrides), the only app-server
+//! request that subscribes a connection to a loaded thread. Its approval
+//! requests, `serverRequest/resolved` and `turn/completed` notices, and the
+//! connection's end go to the app as `AppEvent::RemoteApproval`. The link
+//! never answers a request itself. This machine's threads reach the TUI
+//! through its own connection and are never subscribed here.
 
 use super::voice_command_backend::AppServerAgentBackend;
 use super::voice_command_backend::AppServerTransport;
 use super::voice_command_backend::short_host_name;
+use super::voice_remote_approvals::RemoteAgent;
+use super::voice_remote_approvals::RemoteApprovalEvent;
+use super::voice_remote_approvals::remote_approval_thread_id;
+use crate::app_event::AppEvent;
+use crate::app_event_sender::AppEventSender;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
@@ -34,11 +49,18 @@ use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_client::RequestResult;
 use codex_app_server_client::SshTarget;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadResumeParams;
 use codex_config::config_toml::VoiceMachine;
+use codex_orchestrator::AgentBackend;
+use codex_orchestrator::AgentInfo;
 use codex_orchestrator::BackendError;
 use codex_orchestrator::MachineLink;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -153,18 +175,50 @@ pub(crate) fn resolve_voice_machines(
 }
 
 /// One backend per configured machine, each already connecting in the
-/// background.
+/// background. With `approvals`, each link also forwards its machine's
+/// approval requests there.
 pub(crate) fn remote_backends(
     machines: Vec<VoiceMachineTarget>,
+    approvals: Option<&AppEventSender>,
 ) -> Vec<AppServerAgentBackend<RemoteLink>> {
     machines
         .into_iter()
         .map(|machine| {
-            let link = RemoteLink::new(machine.target);
+            let mut link = RemoteLink::new(machine.target);
+            if let Some(app_event_tx) = approvals {
+                link = link.with_approvals(ApprovalForwarding {
+                    machine: machine.name.clone(),
+                    app_event_tx: app_event_tx.clone(),
+                });
+            }
             link.start_connecting();
             AppServerAgentBackend::new(machine.name, link)
         })
         .collect()
+}
+
+/// Where a link sends its machine's approval requests.
+#[derive(Clone)]
+pub(crate) struct ApprovalForwarding {
+    /// The machine's name in speech and in prompt labels.
+    pub(crate) machine: String,
+    pub(crate) app_event_tx: AppEventSender,
+}
+
+impl ApprovalForwarding {
+    fn send(&self, event: RemoteApprovalEvent) {
+        self.app_event_tx
+            .send(AppEvent::RemoteApproval(Box::new(event)));
+    }
+}
+
+/// The threads one connection listens to, with the agent each request is
+/// labeled with. A thread is added before its `thread/resume` is sent, so the
+/// requests the server replays right after subscribing are recognized.
+type WatchedThreads = Arc<Mutex<HashMap<String, RemoteAgent>>>;
+
+fn lock_watched(watched: &WatchedThreads) -> MutexGuard<'_, HashMap<String, RemoteAgent>> {
+    watched.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Aborts the task when dropped, so replacing a link state stops its work.
@@ -185,11 +239,14 @@ enum LinkState {
         previous_error: Option<String>,
         _task: AbortOnDrop,
     },
-    /// Connected. `_events` owns the client and drains its events.
+    /// Connected. `_events` owns the client and drains its events;
+    /// `_subscribe` subscribes to the machine's loaded threads.
     Up {
         attempt: u64,
         handle: AppServerRequestHandle,
+        watched: WatchedThreads,
         _events: AbortOnDrop,
+        _subscribe: Option<AbortOnDrop>,
     },
 }
 
@@ -202,6 +259,25 @@ struct Shared {
     inner: Mutex<Inner>,
     /// Bumped on every state change, to wake waiting requests.
     changed: watch::Sender<u64>,
+    /// Set when this link forwards approval requests.
+    approvals: Option<ApprovalForwarding>,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // The link is going away: its open prompts can no longer be answered.
+        let state = &self
+            .inner
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state;
+        if let (LinkState::Up { attempt, .. }, Some(approvals)) = (state, &self.approvals) {
+            approvals.send(RemoteApprovalEvent::Disconnected {
+                machine: approvals.machine.clone(),
+                connection: *attempt,
+            });
+        }
+    }
 }
 
 impl Shared {
@@ -228,11 +304,26 @@ impl Shared {
         inner.state = match result {
             Ok(client) => {
                 let handle = AppServerRequestHandle::Remote(client.request_handle());
-                let events = tokio::spawn(watch_events(client, Arc::downgrade(self), attempt));
+                let watched = WatchedThreads::default();
+                let events = tokio::spawn(watch_events(
+                    client,
+                    handle.clone(),
+                    Arc::downgrade(self),
+                    attempt,
+                    Arc::clone(&watched),
+                ));
+                let subscribe = self.approvals.as_ref().map(|_| {
+                    AbortOnDrop(tokio::spawn(subscribe_loaded_threads(
+                        handle.clone(),
+                        Arc::clone(&watched),
+                    )))
+                });
                 LinkState::Up {
                     attempt,
                     handle,
+                    watched,
                     _events: AbortOnDrop(events),
+                    _subscribe: subscribe,
                 }
             }
             Err(error) => LinkState::Down {
@@ -253,10 +344,17 @@ impl Shared {
         if current != attempt {
             return;
         }
+        let was_up = matches!(inner.state, LinkState::Up { .. });
         inner.state = LinkState::Down {
             last_error: Some(first_line(&error)),
         };
         drop(inner);
+        if was_up && let Some(approvals) = &self.approvals {
+            approvals.send(RemoteApprovalEvent::Disconnected {
+                machine: approvals.machine.clone(),
+                connection: attempt,
+            });
+        }
         self.notify();
     }
 }
@@ -269,13 +367,31 @@ fn first_line(text: &str) -> String {
         .to_string()
 }
 
-/// Read and discard the connection's notifications (the orchestrator only
-/// makes requests), and mark the link down when the connection ends. Server
-/// requests such as approvals are left for the machine's own clients.
-async fn watch_events(mut client: RemoteAppServerClient, shared: Weak<Shared>, attempt: u64) {
+/// Drain the connection's events and mark the link down when it ends. With
+/// approval forwarding, approval requests from watched threads and the
+/// notices that withdraw them go to the app; every other server request is
+/// left for the machine's own clients and never answered here.
+async fn watch_events(
+    mut client: RemoteAppServerClient,
+    handle: AppServerRequestHandle,
+    shared: Weak<Shared>,
+    attempt: u64,
+    watched: WatchedThreads,
+) {
+    let approvals = shared.upgrade().and_then(|shared| shared.approvals.clone());
     let reason = loop {
         match client.next_event().await {
             Some(AppServerEvent::Disconnected { message }) => break message,
+            Some(AppServerEvent::ServerRequest(request)) => {
+                if let Some(approvals) = &approvals {
+                    forward_request(approvals, attempt, &handle, &watched, *request);
+                }
+            }
+            Some(AppServerEvent::ServerNotification(notification)) => {
+                if let Some(approvals) = &approvals {
+                    forward_notification(approvals, &notification);
+                }
+            }
             Some(_) => {}
             None => break "connection closed".to_string(),
         }
@@ -285,20 +401,147 @@ async fn watch_events(mut client: RemoteAppServerClient, shared: Weak<Shared>, a
     }
 }
 
-fn connect_args(target: SshTarget) -> RemoteAppServerConnectArgs {
+/// Forward an approval request from a thread this connection subscribed to.
+fn forward_request(
+    approvals: &ApprovalForwarding,
+    attempt: u64,
+    handle: &AppServerRequestHandle,
+    watched: &WatchedThreads,
+    request: ServerRequest,
+) {
+    let Some(thread_id) = remote_approval_thread_id(&request) else {
+        return;
+    };
+    let Some(agent) = lock_watched(watched).get(thread_id).cloned() else {
+        return;
+    };
+    let reply = handle.server_request_reply_handle(request.id().clone());
+    approvals.send(RemoteApprovalEvent::Request {
+        machine: approvals.machine.clone(),
+        connection: attempt,
+        agent,
+        request,
+        reply,
+    });
+}
+
+fn forward_notification(approvals: &ApprovalForwarding, notification: &ServerNotification) {
+    match notification {
+        ServerNotification::ServerRequestResolved(resolved) => {
+            approvals.send(RemoteApprovalEvent::Resolved {
+                machine: approvals.machine.clone(),
+                thread_id: resolved.thread_id.clone(),
+                request_id: resolved.request_id.clone(),
+            });
+        }
+        ServerNotification::TurnCompleted(completed) => {
+            approvals.send(RemoteApprovalEvent::TurnEnded {
+                machine: approvals.machine.clone(),
+                thread_id: completed.thread_id.clone(),
+                turn_id: completed.turn.id.clone(),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// `thread/resume` that only subscribes: no history, no overrides.
+pub(crate) fn subscribe_params(thread_id: &str) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id: thread_id.to_string(),
+        exclude_turns: true,
+        ..ThreadResumeParams::default()
+    }
+}
+
+/// Subscribe to `agents` not yet watched on this connection. A failed
+/// subscribe is forgotten, so the next snapshot tries again.
+async fn subscribe_threads(
+    handle: AppServerRequestHandle,
+    watched: WatchedThreads,
+    agents: Vec<AgentInfo>,
+) {
+    let fresh: Vec<String> = {
+        let mut watched = lock_watched(&watched);
+        agents
+            .into_iter()
+            .filter_map(|agent| {
+                let remote = RemoteAgent {
+                    name: agent.name,
+                    cwd: agent.cwd,
+                };
+                // A rename updates the label of later requests.
+                let fresh = watched.insert(agent.id.clone(), remote).is_none();
+                fresh.then_some(agent.id)
+            })
+            .collect()
+    };
+    let resumes = fresh.into_iter().map(|thread_id| {
+        let handle = handle.clone();
+        let watched = Arc::clone(&watched);
+        async move {
+            let request = ClientRequest::ThreadResume {
+                request_id: RequestId::String(format!("voice-approvals-{}", uuid::Uuid::new_v4())),
+                params: subscribe_params(&thread_id),
+            };
+            // Only success matters: the response's thread and settings are unused.
+            let subscribed = match handle.request(request).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(error.message),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = subscribed {
+                tracing::debug!("voice approvals: could not subscribe to {thread_id}: {error}");
+                lock_watched(&watched).remove(&thread_id);
+            }
+        }
+    });
+    futures::future::join_all(resumes).await;
+}
+
+/// On connect: list the machine's agents the way a snapshot does, and
+/// subscribe to them.
+async fn subscribe_loaded_threads(handle: AppServerRequestHandle, watched: WatchedThreads) {
+    let lister = AppServerAgentBackend::new(String::new(), handle.clone());
+    match lister.list_agents().await {
+        Ok(agents) => subscribe_threads(handle, watched, agents).await,
+        Err(error) => tracing::debug!("voice approvals: could not list agents: {error}"),
+    }
+}
+
+fn connect_args(target: SshTarget, approvals: bool) -> RemoteAppServerConnectArgs {
     RemoteAppServerConnectArgs {
-        // This connection never answers approvals; the machine's own clients
-        // keep doing that.
-        required_human_approval: false,
+        // Eligible for `humanCommand` checkpoints too when forwarding
+        // approvals; answers still need a person.
+        required_human_approval: approvals,
         endpoint: RemoteAppServerEndpoint::Ssh { target },
         client_name: "codex-tui-voice-orchestrator".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
-        opt_out_notification_methods: Vec::new(),
+        // Streaming deltas of subscribed threads are not needed here.
+        opt_out_notification_methods: OPTED_OUT_NOTIFICATIONS
+            .iter()
+            .map(|method| (*method).to_string())
+            .collect(),
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     }
 }
+
+/// High-volume notifications a subscribed voice link ignores.
+const OPTED_OUT_NOTIFICATIONS: &[&str] = &[
+    "item/agentMessage/delta",
+    "item/plan/delta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/textDelta",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "command/exec/outputDelta",
+    "process/outputDelta",
+    "thread/realtime/outputAudio/delta",
+    "thread/realtime/transcript/delta",
+    "thread/realtime/item/transcript/delta",
+];
 
 /// A lazily connected, self-healing app-server connection to one machine
 /// over SSH.
@@ -310,6 +553,10 @@ pub(crate) struct RemoteLink {
 
 impl RemoteLink {
     pub(crate) fn new(target: SshTarget) -> Self {
+        Self::build(target, /*approvals*/ None)
+    }
+
+    fn build(target: SshTarget, approvals: Option<ApprovalForwarding>) -> Self {
         let (changed, _) = watch::channel(0);
         Self {
             target,
@@ -320,8 +567,17 @@ impl RemoteLink {
                     attempts: 0,
                 }),
                 changed,
+                approvals,
             }),
         }
+    }
+
+    /// Forward this machine's approval requests. Call before connecting.
+    pub(crate) fn with_approvals(self, approvals: ApprovalForwarding) -> Self {
+        let connect_wait = self.connect_wait;
+        let mut link = Self::build(self.target.clone(), Some(approvals));
+        link.connect_wait = connect_wait;
+        link
     }
 
     /// How long a request waits for an in-flight connect.
@@ -344,7 +600,7 @@ impl RemoteLink {
         inner.attempts += 1;
         let attempt = inner.attempts;
         let shared = Arc::downgrade(&self.shared);
-        let args = connect_args(self.target.clone());
+        let args = connect_args(self.target.clone(), self.shared.approvals.is_some());
         let task = tokio::spawn(async move {
             let result = RemoteAppServerClient::connect(args).await;
             if let Some(shared) = shared.upgrade() {
@@ -420,6 +676,23 @@ impl AppServerTransport for RemoteLink {
             }
         }
         .boxed()
+    }
+
+    fn watch_threads(&self, agents: &[AgentInfo]) {
+        if self.shared.approvals.is_none() {
+            return;
+        }
+        let LinkState::Up {
+            handle, watched, ..
+        } = &self.shared.lock().state
+        else {
+            return;
+        };
+        tokio::spawn(subscribe_threads(
+            handle.clone(),
+            Arc::clone(watched),
+            agents.to_vec(),
+        ));
     }
 
     fn link(&self) -> MachineLink {

@@ -121,6 +121,8 @@ pub(crate) use approval_overlay::McpElicitationApprovalRequest;
 pub(crate) use approval_overlay::PermissionsApprovalRequest;
 pub(crate) use approval_overlay::VoiceApprovalDecision;
 pub(crate) use approval_overlay::format_requested_permissions_rule;
+pub(crate) use approval_overlay::remote_thread_label;
+pub(crate) use approval_overlay::resolved_voice_key;
 pub(crate) use async_questions::AsyncQuestions;
 pub(crate) use async_questions::QuestionState;
 pub(crate) use async_questions::QuestionSubmission;

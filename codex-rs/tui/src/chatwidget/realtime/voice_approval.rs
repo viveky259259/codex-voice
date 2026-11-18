@@ -269,6 +269,10 @@ pub(crate) fn approval_action_summary(request: &ApprovalRequest) -> ApprovalActi
                 }
             }
         }
+        // A request from another machine arrives without its diff.
+        ApprovalRequest::ApplyPatch(request) if request.changes.is_empty() => {
+            ("edit files".to_string(), "file edits".to_string())
+        }
         ApprovalRequest::ApplyPatch(request) => {
             let count = request.changes.len();
             let target = if count == 1
@@ -310,11 +314,34 @@ fn end_sentence(text: &str) -> String {
     }
 }
 
-/// Spoken when an approval prompt appears during a voice conversation.
+/// "build on devbox" for a request from an agent on another machine.
+fn remote_agent_phrase(request: &ApprovalRequest) -> Option<String> {
+    let (machine, agent) = request.remote_origin()?;
+    Some(format!(
+        "{} on {}",
+        limit_summary(agent),
+        limit_summary(machine)
+    ))
+}
+
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Spoken when an approval prompt appears during a voice conversation. A
+/// request from another machine names its agent and machine: "Build on devbox
+/// wants to run cargo test. Say approve or deny."
 pub(crate) fn approval_request_prompt(request: &ApprovalRequest) -> String {
+    let subject = remote_agent_phrase(request)
+        .map(|phrase| capitalize_first(&phrase))
+        .unwrap_or_else(|| "Codex".to_string());
     limit_words(
         &format!(
-            "Codex wants to {} Say approve or deny.",
+            "{subject} wants to {} Say approve or deny.",
             end_sentence(&approval_action_summary(request).verb_phrase)
         ),
         MAX_SPOKEN_WORDS,
@@ -332,8 +359,11 @@ pub(crate) fn approval_confirmation_prompt(
         ""
     };
     let target = approval_action_summary(request).noun_phrase;
+    let origin = remote_agent_phrase(request)
+        .map(|phrase| format!(" for {phrase}"))
+        .unwrap_or_default();
     limit_words(
-        &format!("Approve {target}{scope}? Say confirm."),
+        &format!("Approve {target}{origin}{scope}? Say confirm."),
         MAX_SPOKEN_WORDS,
     )
 }

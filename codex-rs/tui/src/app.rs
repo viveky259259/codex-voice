@@ -312,6 +312,7 @@ mod voice_command_backend;
 mod voice_command_remote;
 mod voice_commands;
 mod voice_owner;
+pub(crate) mod voice_remote_approvals;
 #[cfg(test)]
 #[path = "app/warnings_tests.rs"]
 mod warnings_tests;

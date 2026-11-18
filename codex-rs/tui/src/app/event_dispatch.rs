@@ -2611,6 +2611,9 @@ impl App {
             AppEvent::VoiceCommandResult { thread_id, result } => {
                 self.handle_voice_command_result(thread_id, result);
             }
+            AppEvent::RemoteApproval(event) => {
+                self.handle_remote_approval_event(*event);
+            }
             AppEvent::RealtimeSessionLockStopped { thread_id } => {
                 if let Some(owner) = self.voice_widget_for_thread(thread_id) {
                     owner.stop_if_session_locked();
@@ -3631,8 +3634,18 @@ impl App {
                 );
             }
             AppEvent::SelectAgentThread(thread_id) => {
-                self.select_agent_thread(tui, app_server, thread_id)
-                    .await?;
+                if let Some(machine) = self
+                    .voice_commands
+                    .remote_approvals
+                    .machine_of(thread_id)
+                {
+                    // An approval from another machine has no thread here.
+                    let message = format!("That agent runs on {machine}; answer it here or there.");
+                    self.chat_widget.add_info_message(message, /*hint*/ None);
+                } else {
+                    self.select_agent_thread(tui, app_server, thread_id)
+                        .await?;
+                }
             }
             AppEvent::StartSide {
                 parent_thread_id,
