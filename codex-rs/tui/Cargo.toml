@@ -54,16 +54,19 @@ codex-mermaid = { workspace = true }
 codex-message-history = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
+codex-orchestrator = { workspace = true }
 codex-models-manager = { workspace = true }
 codex-otel = { workspace = true }
 codex-plugin = { workspace = true }
 codex-protocol = { workspace = true }
 codex-realtime-webrtc = { workspace = true }
 futures = { workspace = true }
+gethostname = { workspace = true }
 codex-rollout = { workspace = true }
 codex-sandboxing = { workspace = true }
 codex-shell-command = { workspace = true }
 codex-state = { workspace = true }
+codex-tailnet = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-worktree = { workspace = true }
 codex-utils-approval-presets = { workspace = true }
@@ -81,6 +84,7 @@ codex-utils-plugins = { workspace = true }
 codex-utils-sandbox-summary = { workspace = true }
 codex-utils-sleep-inhibitor = { workspace = true }
 codex-utils-string = { workspace = true }
+codex-voice-commands = { workspace = true }
 color-eyre = { workspace = true }
 crossterm = { workspace = true, features = ["bracketed-paste", "event-stream"] }
 derive_more = { workspace = true, features = ["debug", "is_variant"] }

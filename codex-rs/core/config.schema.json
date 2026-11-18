@@ -4630,6 +4630,10 @@
         },
         "voice": {
           "$ref": "#/definitions/RealtimeVoice"
+        },
+        "voice_commands": {
+          "description": "Recognize spoken orchestration commands during a voice conversation: list, check, steer, and stop agents, and switch models. Defaults to `true`; set `false` to send every utterance to the model.",
+          "type": "boolean"
         }
       },
       "type": "object"

@@ -89,6 +89,24 @@ pub(crate) enum VoiceControl {
 }
 
 /// Confirmed server lifecycle operations available from the agents dashboard.
+/// The voice-command engine's answer, plus the engine state the widget
+/// mirrors so it can classify the next transcript without a round trip.
+#[derive(Debug)]
+pub(crate) struct VoiceCommandResult {
+    /// The widget's request counter this answers. Only the answer to the
+    /// widget's latest request updates its pending confirmation or question.
+    pub(crate) seq: u64,
+    /// The outcome of a transcript; `None` for a refresh or a cancel.
+    pub(crate) outcome: Option<codex_orchestrator::Outcome>,
+    /// What to say instead of `outcome.spoken`, for commands the app performs
+    /// itself (model switch, machine attach).
+    pub(crate) spoken_override: Option<String>,
+    /// The engine's parser context after this request.
+    pub(crate) context: codex_voice_commands::VoiceContext,
+    /// The agent "it" refers to after this request.
+    pub(crate) last_agent: Option<codex_voice_commands::AgentRef>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AgentsOverviewAction {
     Archive,
@@ -1397,6 +1415,31 @@ pub(crate) enum AppEvent {
     VoiceControl {
         thread_id: Option<ThreadId>,
         control: VoiceControl,
+    },
+    /// A final user transcript the voice widget kept from the model because it
+    /// is a voice command, or the answer to one ("confirm", "the second one").
+    /// `App` runs it through its orchestrator.
+    VoiceCommand {
+        thread_id: ThreadId,
+        seq: u64,
+        transcript: String,
+        approval_prompt_open: bool,
+    },
+    /// The voice widget let a transcript reach the model while a voice command
+    /// waited for "confirm" or "which one?"; drop that pending state.
+    VoiceCommandCancel {
+        thread_id: ThreadId,
+        seq: u64,
+    },
+    /// Voice started: refresh the agent snapshot behind voice commands.
+    VoiceCommandRefresh {
+        thread_id: ThreadId,
+        seq: u64,
+    },
+    /// The orchestrator answered a voice-command request.
+    VoiceCommandResult {
+        thread_id: ThreadId,
+        result: Box<VoiceCommandResult>,
     },
     RealtimeConversationStateChanged,
     RealtimeSessionLockStopped {

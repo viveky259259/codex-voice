@@ -42,6 +42,9 @@ pub(crate) struct VoiceControlState {
     /// the model's handoff). The other path's copy of the same answer is
     /// swallowed instead of being applied a second time.
     pub(super) consumed_voice_controls: VecDeque<ConsumedVoiceControl>,
+    /// Spoken orchestration commands: the mirrored parser context and any
+    /// command waiting for "confirm" or "which one?".
+    pub(super) voice_commands: super::voice_commands::VoiceCommandState,
 }
 
 /// Which copy of a spoken answer handled it. The realtime API delivers both the
@@ -127,7 +130,7 @@ impl ChatWidget {
         }
     }
 
-    fn voice_status_available(&self) -> bool {
+    pub(super) fn voice_status_available(&self) -> bool {
         self.realtime_conversation.phase == RealtimeConversationPhase::Active
             && !self.app_event_tx.voice_only.load(Ordering::Relaxed)
             && self.realtime_conversation.thread_id.is_some()
@@ -227,7 +230,9 @@ impl ChatWidget {
         self.speak_realtime_status(&turn_error_speech(message));
     }
 
-    /// Route a final user transcript. Approval answers are applied locally.
+    /// Route a final user transcript. Approval answers are applied locally;
+    /// voice commands go to the app's orchestrator. Approvals always come
+    /// first, so a bare "stop" stays an approval abort.
     pub(super) fn on_realtime_user_utterance(&mut self, text: &str, pre_utterance_generation: u64) {
         let intent = parse_voice_approval_intent(text);
         if let Some(intent) = intent
@@ -242,6 +247,10 @@ impl ChatWidget {
                 self.remember_consumed_voice_control(VoiceControlSource::Transcript, intent);
             }
             self.keep_in_flight_voice_turns(pre_utterance_generation);
+        } else if self.handle_realtime_voice_command(text) {
+            // Approval echoes stay remembered: a voice command is not new speech
+            // for the model, so a late approval handoff is still recognized.
+            self.keep_in_flight_voice_turns(pre_utterance_generation);
         } else {
             // A later handoff of ordinary speech must not be mistaken for an old answer.
             self.realtime_conversation
@@ -251,10 +260,11 @@ impl ChatWidget {
         }
     }
 
-    /// A handoff that only repeats an approval answer is not a new voice request.
+    /// A handoff that only repeats an approval answer or a voice command is not a
+    /// new voice request.
     ///
-    /// Returns `true` when the delegated input was answered locally. Its turn keeps
-    /// any existing voice ownership and never takes over speech.
+    /// Returns `true` when the delegated input was answered locally or swallowed.
+    /// Its turn keeps any existing voice ownership and never takes over speech.
     pub(super) fn consume_realtime_voice_control_handoff(
         &mut self,
         turn_id: &str,
@@ -264,10 +274,34 @@ impl ChatWidget {
             return false;
         }
         let display = realtime_delegation_display_text(input);
-        let Some(intent) = parse_voice_approval_intent(&display) else {
-            return false;
+        let handled = match parse_voice_approval_intent(&display) {
+            Some(intent) => self.consume_realtime_approval_handoff(&display, intent),
+            None => false,
         };
-        let handled = if self.take_consumed_voice_control(VoiceControlSource::Transcript, intent) {
+        // A voice command, or a "confirm"/"yes"/"no" while one waits, is swallowed
+        // and never run: only the user's own transcript runs voice commands.
+        let handled = handled || self.swallow_realtime_voice_command_handoff(&display);
+        if !handled {
+            return false;
+        }
+        let input_generation = self.realtime_conversation.input_generation;
+        self.realtime_conversation
+            .turn_origins
+            .entry(turn_id.to_string())
+            .or_insert(RealtimeTurnOrigin::Delegated {
+                may_speak: false,
+                input_generation,
+            });
+        true
+    }
+
+    /// Lane A: a handed-off approval answer. Returns `true` when it was handled.
+    fn consume_realtime_approval_handoff(
+        &mut self,
+        display: &str,
+        intent: VoiceApprovalIntent,
+    ) -> bool {
+        if self.take_consumed_voice_control(VoiceControlSource::Transcript, intent) {
             // The user's transcript already answered; this is its echo.
             true
         } else {
@@ -275,7 +309,7 @@ impl ChatWidget {
                 // A refusal is safe to apply from the handoff. Remember it so the
                 // late transcript of the same words does not refuse the next prompt.
                 VoiceApprovalIntent::Deny | VoiceApprovalIntent::Abort => {
-                    let applied = self.handle_realtime_voice_approval(&display);
+                    let applied = self.handle_realtime_voice_approval(display);
                     if applied {
                         self.remember_consumed_voice_control(VoiceControlSource::Handoff, intent);
                     }
@@ -291,19 +325,7 @@ impl ChatWidget {
                         && self.bottom_pane.current_approval_request().is_some()
                 }
             }
-        };
-        if !handled {
-            return false;
         }
-        let input_generation = self.realtime_conversation.input_generation;
-        self.realtime_conversation
-            .turn_origins
-            .entry(turn_id.to_string())
-            .or_insert(RealtimeTurnOrigin::Delegated {
-                may_speak: false,
-                input_generation,
-            });
-        true
     }
 
     fn remember_consumed_voice_control(

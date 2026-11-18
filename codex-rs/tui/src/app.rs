@@ -308,6 +308,8 @@ mod user_turn_submission;
 mod user_verification;
 mod user_verification_errors;
 mod user_verification_requests;
+mod voice_command_backend;
+mod voice_commands;
 mod voice_owner;
 #[cfg(test)]
 #[path = "app/warnings_tests.rs"]
@@ -671,6 +673,8 @@ pub(crate) struct App {
     background_voice_error: Option<(ThreadId, String)>,
     /// `[realtime] auto_start` fires once per process, for the first eligible thread.
     voice_auto_start_attempted: bool,
+    /// Runs spoken orchestration commands ("what's build doing") off the UI loop.
+    voice_commands: voice_commands::VoiceCommandRunner,
     temporary_structured_requests: HashMap<
         ThreadId,
         (

@@ -8,6 +8,7 @@ mod recording_controls;
 mod session_lock;
 mod transcript_replay;
 mod voice_approval;
+mod voice_commands;
 mod voice_status;
 
 pub(crate) use failure_metrics::RealtimeFailureCause;
@@ -634,6 +635,7 @@ impl ChatWidget {
             "Voice conversation started.".to_string(),
             Some("Use /voice mute to mute or /voice to stop.".to_string()),
         );
+        self.request_voice_command_refresh();
     }
 
     pub(crate) fn is_current_realtime_attempt(

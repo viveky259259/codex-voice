@@ -110,8 +110,13 @@ starts a code block or diff.
 
 ## TUI integration
 
-Not wired yet (needs a `codex-tui` build, which is Mac work). Add
-`codex-orchestrator = { workspace = true }` to `tui/Cargo.toml`.
+Wired for this machine's app server: `tui/src/app/voice_command_backend.rs`
+(the backend) and `tui/src/app/voice_commands.rs` (one engine on a background
+task, fed in order by `AppEvent::VoiceCommand`). The voice widget decides
+synchronously which transcripts are commands with `parse_with_last_agent` and
+`is_cancel_phrase`, mirroring the engine's context, "it" agent, and pending
+state, so ordinary speech never waits on the engine. Remote machines are not
+backends yet: tailnet machines are known names only.
 
 ### An app-server-backed `AgentBackend`
 
