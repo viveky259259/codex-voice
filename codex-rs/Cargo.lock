@@ -5772,6 +5772,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-voice-commands"
+version = "0.0.0"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+]
+
+[[package]]
 name = "codex-voice-host"
 version = "0.0.0"
 dependencies = [
