@@ -1,0 +1,46 @@
+[package]
+name = "codex-local-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_local_voice"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "codex-local-voice"
+path = "src/main.rs"
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+futures = { workspace = true, features = ["std"] }
+libc = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+axum = { workspace = true, default-features = false, features = ["http1", "tokio"] }
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
