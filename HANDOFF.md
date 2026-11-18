@@ -1,5 +1,130 @@
 # Handoff: codex-voice fork (cloud session → local Mac)
 
+## Mac inbox
+
+Requests from the cloud session to the Mac session ("Local: Voice first",
+/Users/advait/Documents/Projects/codex-voice). Newest first. To reply, add an
+entry under "## Mac outbox" below with the request id, what you ran, and the
+results (exact `test result:` lines, errors, log tails), then commit and push to
+`wip`. The cloud session polls `wip`.
+
+### 2026-11-18 #1: standalone local voice (no TUI yet)
+
+Status: the TUI wiring of local voice (`[realtime] backend = "local"`) is being
+built in the cloud now. Until it lands, `/voice` still uses OpenAI realtime and
+404s. That is expected. The next inbox entry will say when it lands and how to
+test it. This request tests the audio engine on its own with its CLI.
+
+1. Update and build (from the repo root):
+
+   ```bash
+   git fetch origin && git checkout wip && git pull --ff-only
+   cd codex-rs && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build -p codex-local-voice
+   ```
+
+2. Prerequisites:
+
+   ```bash
+   brew install ffmpeg
+   uv tool install mlx-whisper        # provides the mlx_whisper command
+   ffmpeg -hide_banner -f avfoundation -list_devices true -i ""   # note the audio input index
+   ```
+
+   The app that runs the commands (Claude.app or your terminal) needs microphone
+   access: System Settings → Privacy & Security → Microphone. The first
+   `listen` run may trigger the prompt.
+
+3. Save as `codex-rs/voice-say.toml` (ffmpeg avfoundation capture + `say` +
+   mlx_whisper). Set `device` to the index from step 2:
+
+   ```toml
+   [capture]
+   command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
+              "-i", ":{device}", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
+   device = "0"
+
+   [stt]
+   backend = "command"
+   command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+              "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
+   timeout_ms = 60000
+
+   [tts]
+   backend = "command"
+   command = ["say", "{text}"]
+   ```
+
+4. Save as `codex-rs/voice-mcp.toml` (local-agents MCP at
+   http://127.0.0.1:5051/mcp for both directions). Start the server first with
+   `uv run mcp_server.py --transport streamable-http`. The tool and argument
+   names below are guesses, because `mcp_server.py` isn't pushed to
+   viveky259259/local-agents. Fix them from the output of
+   `cargo run -p codex-local-voice -- tools http://127.0.0.1:5051/mcp`.
+
+   ```toml
+   [capture]
+   command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
+              "-i", ":{device}", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
+   device = "0"
+
+   [stt]
+   backend = "mcp"
+   url = "http://127.0.0.1:5051/mcp"
+   tool = "transcribe"
+   arguments = { model_id = "whisper:base", input_path = "{wav}" }
+   # text_path = "result.text"
+
+   [stt.job]
+   tool = "get_job"
+   arguments = { job_id = "{job_id}" }
+   poll_interval_ms = 250
+   timeout_ms = 120000
+
+   [tts]
+   backend = "mcp"
+   url = "http://127.0.0.1:5051/mcp"
+   tool = "speak"
+   arguments = { model_id = "hf:mlx-community/Kokoro-82M-8bit", voice = "af_heart", text = "{text}" }
+   # audio_path = "artifacts.0.path"
+   # artifact_dir = "/path/to/local-agents/artifacts"
+
+   [tts.job]
+   tool = "get_job"
+   arguments = { job_id = "{job_id}" }
+
+   [playback]
+   player = ["afplay", "{wav}"]
+   ```
+
+5. Run, from `codex-rs/`:
+
+   ```bash
+   cargo test -p codex-local-voice
+   cargo run -p codex-local-voice -- config
+   cargo run -p codex-local-voice -- say --config voice-say.toml "Hello from Codex"
+   RUST_LOG=codex_local_voice=debug cargo run -p codex-local-voice -- listen --config voice-say.toml
+   ```
+
+   In `listen`, ask the user to say two sentences with a pause between them.
+   Each should print one `Transcript` event. Type a line to hear it spoken,
+   and check that the spoken audio is NOT transcribed back (half duplex).
+   `/stop` stops speech. Ctrl-C quits. Then repeat `say` and `listen` with
+   `--config voice-mcp.toml` (after `tools`).
+
+6. Report in the outbox:
+   - the `test result:` line
+   - whether `say` was heard
+   - the transcripts printed vs. what was said, and the latency
+   - any self-transcription
+   - the `tools` output (tool names and argument schemas)
+   - any changes you had to make to the two TOML files
+   - error messages
+
+## Mac outbox
+
+(Mac session: add replies here, newest first.)
+
+
 Goal: a voice-first fork of OpenAI Codex that also runs Claude models, attaches to
 Codex on other machines over Tailscale/SSH (from T3 Code), and orchestrates
 running agents (from Ambient-style workflows).
