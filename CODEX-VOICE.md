@@ -13,7 +13,7 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
 | Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Not wired into the TUI yet. |
 | Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator` | Tested with a fake backend. App-server backend and TUI wiring: next, on the Mac. |
-| `codex remote list` / `codex remote attach` (Tailscale + SSH) | `codex-rs/tailnet`, `app-server-client`, `cli` | On `wip`: transport tested, CLI not yet compiled. |
+| `codex remote list` / `codex remote attach` (Tailscale + SSH) | `codex-rs/tailnet`, `app-server-client`, `cli` | Tested on macOS with fake ssh/tailscale against a real local server. Real tailnet: not yet. |
 
 Branches: `codex-voice` holds tested work; `wip` adds work still being tested
 (see `HANDOFF.md` there).
@@ -85,7 +85,7 @@ The catalog tells Codex about Claude's context window and enables the
 apply_patch tool. See `codex-rs/anthropic-proxy/README.md` for the full mapping
 and known gaps (OpenAI-hosted tools such as web search are dropped).
 
-## Other machines (on `wip`)
+## Other machines
 
 ```bash
 codex remote list                 # Tailscale peers + ~/.ssh/config hosts
