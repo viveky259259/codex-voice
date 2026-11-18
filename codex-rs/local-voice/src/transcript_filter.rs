@@ -30,7 +30,30 @@ pub fn clean_transcript(
     if config.drop_bracketed && is_only_annotations(&cleaned) {
         return None;
     }
+    if is_repetition_loop(&cleaned, config) {
+        return None;
+    }
     Some(cleaned)
+}
+
+/// True for a long transcript made of a few words looped over and over.
+fn is_repetition_loop(text: &str, config: &TranscriptFilterConfig) -> bool {
+    if config.max_distinct_word_ratio <= 0.0 {
+        return false;
+    }
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() < config.repeat_min_words.max(2) {
+        return false;
+    }
+    let distinct = words.iter().collect::<std::collections::HashSet<_>>().len();
+    (distinct as f32) / (words.len() as f32) <= config.max_distinct_word_ratio
 }
 
 fn match_key(text: &str) -> String {
@@ -78,6 +101,23 @@ mod tests {
         );
         assert_eq!(clean_transcript("...", 2000, &config), None);
         assert_eq!(clean_transcript("Thank you.", 400, &config), None);
+        assert_eq!(
+            clean_transcript(
+                "Það er það er það er það. Það er það er það. Það er það er það.",
+                9000,
+                &config
+            ),
+            None
+        );
+        // Ordinary sentences with some repeated words are kept.
+        assert_eq!(
+            clean_transcript(
+                "run the tests and then run the linter on the tests",
+                3000,
+                &config
+            ),
+            Some("run the tests and then run the linter on the tests".to_string())
+        );
         assert_eq!(clean_transcript("thank you", 400, &config), None);
         assert_eq!(
             clean_transcript("Thank you.", 1500, &config),
@@ -100,6 +140,8 @@ mod tests {
             drop_if_short: Vec::new(),
             short_utterance_ms: 600,
             drop_bracketed: false,
+            max_distinct_word_ratio: 0.0,
+            repeat_min_words: 8,
         };
         assert_eq!(clean_transcript("Um.", 2000, &config), None);
         assert_eq!(

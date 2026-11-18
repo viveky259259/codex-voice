@@ -46,7 +46,7 @@ pub(crate) struct ProcessGuard {
 
 impl ProcessGuard {
     pub(crate) fn spawn(mut command: Command, argv: &[String]) -> Result<Self> {
-        let mut child = command.spawn().map_err(|err| {
+        let mut child = spawn_retrying_busy(&mut command).map_err(|err| {
             VoiceError::Command(format!("failed to start `{}`: {err}", program_name(argv)))
         })?;
         let stderr = child.stderr.take().map(StderrTail::collect);
@@ -242,4 +242,22 @@ pub(crate) fn failure_message(argv: &[String], status: ExitStatus, stderr_tail: 
         message.push_str(stderr_tail);
     }
     message
+}
+
+/// Linux reports ETXTBSY ("Text file busy") when an executable is started
+/// while another thread's freshly forked child still holds it open for
+/// writing, for example a script that was just written. It clears within
+/// milliseconds, so retry a few times before giving up.
+fn spawn_retrying_busy(command: &mut Command) -> std::io::Result<Child> {
+    const ETXTBSY: i32 = 26;
+    let mut attempts = 0;
+    loop {
+        match command.spawn() {
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempts < 5 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * attempts));
+            }
+            result => return result,
+        }
+    }
 }

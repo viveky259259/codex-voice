@@ -63,7 +63,7 @@ device = "0"            # ffmpeg -f avfoundation -list_devices true -i ""
 
 [realtime.local.stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo", "--language", "en",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 
 [realtime.local.tts]

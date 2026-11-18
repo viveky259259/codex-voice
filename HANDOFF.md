@@ -139,7 +139,7 @@ test it. This request tests the audio engine on its own with its CLI.
 
    [stt]
    backend = "command"
-   command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
+   command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo", "--language", "en",
               "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
    timeout_ms = 60000
 
@@ -282,7 +282,7 @@ device = "0"
 
 [stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo", "--language", "en",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 timeout_ms = 60000
 
@@ -397,7 +397,7 @@ device = "0"
 
 [realtime.local.stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo", "--language", "en",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 timeout_ms = 60000
 

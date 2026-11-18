@@ -3,6 +3,7 @@ use pretty_assertions::assert_eq;
 use super::*;
 use crate::test_support::silence;
 use crate::test_support::tone;
+use crate::test_support::voice;
 
 fn run(vad: &mut Vad, samples: &[i16]) -> Vec<VadEvent> {
     // Feed in uneven chunks to exercise frame reassembly.
@@ -18,7 +19,7 @@ fn utterances(events: &[VadEvent]) -> Vec<&Utterance> {
         .iter()
         .filter_map(|event| match event {
             VadEvent::SpeechEnded(utterance) => Some(utterance),
-            VadEvent::SpeechStarted => None,
+            VadEvent::SpeechStarted | VadEvent::SpeechDiscarded => None,
         })
         .collect()
 }
@@ -42,7 +43,7 @@ fn silence_produces_no_events() {
 fn tone_burst_is_one_utterance_with_pre_roll() {
     let mut input = silence(1000, 2);
     let tone_start = input.len();
-    input.extend(tone(1000, 8000.0));
+    input.extend(voice(1000, 8000.0));
     input.extend(silence(1500, 3));
 
     let mut vad = Vad::new(VadConfig::default());
@@ -103,7 +104,7 @@ fn max_length_cuts_the_utterance() {
         ..VadConfig::default()
     };
     let mut input = silence(600, 10);
-    input.extend(tone(4500, 7000.0));
+    input.extend(voice(4500, 7000.0));
     input.extend(silence(1000, 11));
     let mut vad = Vad::new(config);
     let events = run(&mut vad, &input);
@@ -134,7 +135,7 @@ fn noise_floor_adapts_to_steady_background() {
     assert_eq!(run(&mut vad, &input), Vec::new());
     assert!(vad.noise_floor() > 200.0, "floor {}", vad.noise_floor());
 
-    input = tone(800, 6000.0);
+    input = voice(800, 6000.0);
     input.extend(tone(1500, 400.0));
     let events = run(&mut vad, &input);
     assert_eq!(starts(&events), 1);
@@ -144,7 +145,7 @@ fn noise_floor_adapts_to_steady_background() {
 #[test]
 fn flush_returns_speech_in_progress() {
     let mut input = silence(600, 14);
-    input.extend(tone(800, 8000.0));
+    input.extend(voice(800, 8000.0));
     let mut vad = Vad::new(VadConfig::default());
     let events = run(&mut vad, &input);
     assert_eq!(starts(&events), 1);
@@ -175,7 +176,7 @@ fn noise(ms: u32, amplitude: i16, seed: u32) -> Vec<i16> {
 }
 
 #[test]
-fn a_step_up_in_steady_noise_ends_the_utterance_instead_of_running_to_max() {
+fn a_step_up_in_steady_noise_is_discarded_instead_of_running_to_max() {
     // Calibrates on near-digital silence (a virtual mic warming up), then the
     // room's steady noise arrives well above that floor and never stops.
     let mut input = silence(500, 20);
@@ -183,20 +184,16 @@ fn a_step_up_in_steady_noise_ends_the_utterance_instead_of_running_to_max() {
     let mut vad = Vad::new(VadConfig::default());
     let events = run(&mut vad, &input);
 
-    let found = utterances(&events);
-    assert_eq!(found.len(), 1, "{} utterances", found.len());
-    assert!(!found[0].truncated, "ran to max_utterance_ms");
-    assert!(
-        found[0].duration_ms() <= 6_000,
-        "ended after {} ms",
-        found[0].duration_ms()
-    );
+    // The steady noise is recognised and discarded within a second or so:
+    // nothing to transcribe, no 30 s wait.
+    assert_eq!(utterances(&events).len(), 0, "{events:?}");
+    assert!(events.contains(&VadEvent::SpeechDiscarded), "{events:?}");
     // The floor now sits at the noise, so it doesn't restart on it.
     assert_eq!(starts(&events), 1);
     assert!(!vad.in_speech());
 
     // Speech over the noise is still detected and ends normally.
-    let mut speech = tone(1000, 12_000.0);
+    let mut speech = voice(1000, 12_000.0);
     speech.extend(noise(1500, 1500, 22));
     let events = run(&mut vad, &speech);
     assert_eq!(starts(&events), 1);
@@ -236,9 +233,40 @@ fn quiet_speech_right_after_loud_noise_stops_is_still_heard() {
     let mut vad = Vad::new(VadConfig::default());
     run(&mut vad, &input);
 
-    let mut speech = tone(800, 1500.0);
+    let mut speech = voice(800, 1500.0);
     speech.extend(silence(1200, 73));
     let events = run(&mut vad, &speech);
     assert_eq!(starts(&events), 1, "floor {}", vad.noise_floor());
     assert_eq!(utterances(&events).len(), 1);
+}
+
+#[test]
+fn hiss_after_digital_silence_never_starts_speech() {
+    // The Mac's virtual mic: 250 ms of exact zeros, then steady hiss about as
+    // loud as speech (around -28 dBFS), and nobody talking.
+    let mut input = vec![0i16; ms_to_samples(250)];
+    input.extend(noise(16_000, 1400, 80));
+    let mut vad = Vad::new(VadConfig::default());
+    let events = run(&mut vad, &input);
+    assert_eq!(utterances(&events).len(), 0, "{events:?}");
+    assert!(!vad.in_speech());
+}
+
+#[test]
+fn steady_hiss_mistaken_for_speech_is_discarded_not_transcribed() {
+    // Calibrated on a genuinely quiet start, then a steady hiss arrives: it
+    // starts as "speech", is recognised as steady, and is discarded.
+    let mut input = silence(500, 81);
+    input.extend(noise(6_000, 1400, 82));
+    let mut vad = Vad::new(VadConfig::default());
+    let events = run(&mut vad, &input);
+    assert_eq!(utterances(&events).len(), 0, "{events:?}");
+    assert!(events.contains(&VadEvent::SpeechDiscarded), "{events:?}");
+    assert!(starts(&events) <= 1);
+
+    // Real speech over that hiss is still heard.
+    let mut speech = voice(1200, 14_000.0);
+    speech.extend(noise(1500, 1400, 83));
+    let events = run(&mut vad, &speech);
+    assert_eq!(utterances(&events).len(), 1, "{events:?}");
 }

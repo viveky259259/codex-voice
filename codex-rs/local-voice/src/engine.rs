@@ -485,6 +485,8 @@ async fn handle_vad_event(
             shared.emit(LocalVoiceEvent::SpeechEnded).await;
             let _ = utterances.send(utterance);
         }
+        // Steady noise, not speech: back to listening, nothing to transcribe.
+        VadEvent::SpeechDiscarded => shared.emit(LocalVoiceEvent::Listening).await,
     }
 }
 
