@@ -1,0 +1,79 @@
+name: codex-voice
+
+# Tests for the crates this fork adds or changes. Upstream's own workflows also
+# run on the fork; this one covers the fork's features on Linux and macOS.
+
+on:
+  push:
+    branches: [codex-voice, wip]
+  pull_request:
+    branches: [codex-voice]
+  workflow_dispatch:
+
+concurrency:
+  group: codex-voice-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  RUST_MIN_STACK: "8388608" # 8 MiB, as upstream CI
+
+jobs:
+  crates:
+    name: Fork crates - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex-rs/target
+          key: codex-voice-crates-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: codex-voice-crates-${{ runner.os }}-
+      - name: Test fork crates
+        run: >
+          cargo test
+          -p codex-voice-commands
+          -p codex-orchestrator
+          -p codex-anthropic-proxy
+          -p codex-local-voice
+          -p codex-tailnet
+          -p codex-app-server-client
+
+  tui-voice:
+    name: TUI voice suite - ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex-rs/target
+          key: codex-voice-tui-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: codex-voice-tui-${{ runner.os }}-
+      - name: Free disk space
+        working-directory: .
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc && df -h /
+      - name: Voice, approval and realtime TUI tests
+        run: cargo test -p codex-tui --lib -- realtime approval voice
+      - name: Config tests
+        run: cargo test -p codex-config
