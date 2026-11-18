@@ -28,6 +28,18 @@ Development continues in the cloud session; the Mac is the test bench
 - Lane C (below).
 
 ## Mac test checklist (always `export RUST_MIN_STACK=8388608`, as upstream CI)
+Also `export CARGO_NET_GIT_FETCH_WITH_CLI=true` on a first build: libgit2 failed
+to clone the v8 Chromium submodule (abseil-cpp) on the Mac; the git CLI works.
+
+### Mac results so far (wip 1b18208, macOS arm64)
+- Lane A: codex-tui realtime/approval/voice 366 passed. codex-core lib 731 passed;
+  core tests/all.rs 22 failures are unrelated to the fork (helper bins not prebuilt,
+  code_mode). That run predates the review fix: rerun on current wip.
+- Lane C: all green after two test-setup fixes (now committed): tailnet 19,
+  app-server-client 69 + 1 + ssh_remote 3, cli remote_cmd 4, cli remote_ssh 3.
+  Lane C is now on codex-voice.
+- Not yet: live voice, real-tailnet remote list/attach, Claude via the real API.
+
 1. Lane C compile + tests (never compiled in the cloud):
    `cargo test -p codex-cli --test remote_ssh`, `cargo test -p codex-cli remote_cmd`,
    `cargo test -p codex-tailnet`, `cargo test -p codex-app-server-client`.

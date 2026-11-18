@@ -106,7 +106,8 @@ fn remote_list_explains_missing_tailscale() -> Result<()> {
         .env("HOME", home.path())
         .env("CODEX_HOME", home.path().join(".codex"))
         .env("PATH", empty_path.path())
-        .env_remove("CODEX_TAILSCALE_BIN")
+        // An explicit missing binary also skips the macOS Tailscale.app fallback.
+        .env("CODEX_TAILSCALE_BIN", empty_path.path().join("tailscale"))
         .args(["remote", "list"])
         .output()?;
     assert!(!output.status.success());
@@ -149,13 +150,18 @@ async fn exec_over_ssh_remote_reaches_a_real_app_server() -> Result<()> {
     let _server = TestAppServer::builder()
         .with_program(&codex)
         .with_codex_home(server_home.path())
+        // `codex app-server` does not accept the test-only startup-tasks flag.
+        .with_plugin_startup_tasks()
         .without_managed_config()
         .with_args(&["app-server", "--listen", "unix://"])
         .with_env_overrides(&[
             ("OPENAI_API_KEY", None),
             ("CODEX_API_KEY", None),
             ("CODEX_ACCESS_TOKEN", None),
-            ("CODEX_SSH_TEST_SERVER_API_KEY", Some("server-only-test-key")),
+            (
+                "CODEX_SSH_TEST_SERVER_API_KEY",
+                Some("server-only-test-key"),
+            ),
         ])
         .build()
         .await?;
@@ -201,7 +207,13 @@ exec /bin/sh -c "$*"
             .env_remove("CODEX_SSH_TEST_SERVER_API_KEY")
             .current_dir(client_home.path())
             .kill_on_drop(true)
-            .args(["exec", "--remote", "ssh://me@fakehost", "--json", "say hello"])
+            .args([
+                "exec",
+                "--remote",
+                "ssh://me@fakehost",
+                "--json",
+                "say hello",
+            ])
             .output(),
     )
     .await??;
