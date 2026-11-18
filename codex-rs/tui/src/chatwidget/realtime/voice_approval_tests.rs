@@ -200,6 +200,21 @@ fn long_commands_are_truncated_before_speaking() {
         approval_request_prompt(&multiline),
         "Codex wants to run echo one… Say approve or deny."
     );
+
+    let leading_blank = exec_request(&["bash", "-lc", "\n  \ncargo build\ncargo test"]);
+    assert_eq!(
+        approval_request_prompt(&leading_blank),
+        "Codex wants to run cargo build… Say approve or deny."
+    );
+    let empty = exec_request(&["bash", "-lc", "  \n"]);
+    assert_eq!(
+        approval_request_prompt(&empty),
+        "Codex wants to run a command. Say approve or deny."
+    );
+    assert_eq!(
+        approval_confirmation_prompt(&empty, VoiceApprovalIntent::Approve),
+        "Approve a command? Say confirm."
+    );
 }
 
 #[test]
@@ -226,6 +241,22 @@ fn turn_errors_are_summarized_in_one_short_sentence() {
         "Codex hit an error: stream disconnected before completion."
     );
     assert_eq!(turn_error_speech("  \n"), "Codex hit an error.");
+    assert_eq!(
+        turn_error_speech("model gpt-5.1-codex not found. Check config.toml."),
+        "Codex hit an error: model gpt-5.1-codex not found."
+    );
+    assert_eq!(
+        turn_error_speech("request to https://api.example.com/v1/responses failed"),
+        "Codex hit an error: request to https://api.example.com/v1/responses failed."
+    );
+    assert_eq!(
+        turn_error_speech("could not read ~/.codex/config.toml"),
+        "Codex hit an error: could not read ~/.codex/config.toml."
+    );
+    assert_eq!(
+        turn_error_speech("Quota exceeded! Try again tomorrow."),
+        "Codex hit an error: Quota exceeded."
+    );
     let long = "word ".repeat(80);
     let spoken = turn_error_speech(&long);
     assert!(

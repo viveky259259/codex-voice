@@ -12,7 +12,6 @@ use super::RealtimeAgentItemOrigin;
 use super::RealtimeConversationPhase;
 use super::RealtimeTurnOrigin;
 use super::realtime_delegation_display_text;
-use super::realtime_input_fingerprint;
 use super::realtime_voice_supported;
 use super::voice_approval::MAX_SPOKEN_WORDS;
 use super::voice_approval::VoiceApprovalIntent;
@@ -39,8 +38,25 @@ pub(crate) struct VoiceControlState {
     pub(super) voice_approval: Option<PendingVoiceApproval>,
     /// Short spoken status prompts that have no text fallback to restore.
     pub(super) status_speech: VecDeque<u64>,
-    /// Utterances answered locally; a matching handoff is not a new voice request.
-    pub(super) consumed_voice_controls: VecDeque<(usize, u64)>,
+    /// Approval answers already handled by one path (the user's transcript or
+    /// the model's handoff). The other path's copy of the same answer is
+    /// swallowed instead of being applied a second time.
+    pub(super) consumed_voice_controls: VecDeque<ConsumedVoiceControl>,
+}
+
+/// Which copy of a spoken answer handled it. The realtime API delivers both the
+/// user's input transcript and, sometimes, the model's handoff of the same
+/// words, in either order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VoiceControlSource {
+    Transcript,
+    Handoff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConsumedVoiceControl {
+    source: VoiceControlSource,
+    intent: VoiceApprovalIntent,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,16 +136,27 @@ impl ChatWidget {
 
     pub(crate) fn is_realtime_status_speech(&self, delivery_id: u64) -> bool {
         self.realtime_conversation
-            .voice_controls.status_speech
+            .voice_controls
+            .status_speech
             .contains(&delivery_id)
     }
 
     pub(super) fn forget_realtime_status_speech(&mut self, delivery_id: u64) -> bool {
-        let before = self.realtime_conversation.voice_controls.status_speech.len();
+        let before = self
+            .realtime_conversation
+            .voice_controls
+            .status_speech
+            .len();
         self.realtime_conversation
-            .voice_controls.status_speech
+            .voice_controls
+            .status_speech
             .retain(|id| *id != delivery_id);
-        before != self.realtime_conversation.voice_controls.status_speech.len()
+        before
+            != self
+                .realtime_conversation
+                .voice_controls
+                .status_speech
+                .len()
     }
 
     /// Speak a short status line through the call's appendSpeech path.
@@ -145,11 +172,21 @@ impl ChatWidget {
             return false;
         }
         let delivery_id = NEXT_REALTIME_SPEECH_DELIVERY_ID.fetch_add(1, Ordering::Relaxed);
-        if self.realtime_conversation.voice_controls.status_speech.len() >= MAX_STATUS_SPEECH_DELIVERIES {
-            self.realtime_conversation.voice_controls.status_speech.pop_front();
+        if self
+            .realtime_conversation
+            .voice_controls
+            .status_speech
+            .len()
+            >= MAX_STATUS_SPEECH_DELIVERIES
+        {
+            self.realtime_conversation
+                .voice_controls
+                .status_speech
+                .pop_front();
         }
         self.realtime_conversation
-            .voice_controls.status_speech
+            .voice_controls
+            .status_speech
             .push_back(delivery_id);
         let submitted = self.submit_op(AppCommand::RealtimeConversationSpeech {
             thread_id,
@@ -192,12 +229,25 @@ impl ChatWidget {
 
     /// Route a final user transcript. Approval answers are applied locally.
     pub(super) fn on_realtime_user_utterance(&mut self, text: &str, pre_utterance_generation: u64) {
+        let intent = parse_voice_approval_intent(text);
+        if let Some(intent) = intent
+            && self.take_consumed_voice_control(VoiceControlSource::Handoff, intent)
+        {
+            // The model's handoff of these same words already applied them.
+            self.keep_in_flight_voice_turns(pre_utterance_generation);
+            return;
+        }
         if self.handle_realtime_voice_approval(text) {
-            self.remember_consumed_voice_control(text);
+            if let Some(intent) = intent {
+                self.remember_consumed_voice_control(VoiceControlSource::Transcript, intent);
+            }
             self.keep_in_flight_voice_turns(pre_utterance_generation);
         } else {
             // A later handoff of ordinary speech must not be mistaken for an old answer.
-            self.realtime_conversation.voice_controls.consumed_voice_controls.clear();
+            self.realtime_conversation
+                .voice_controls
+                .consumed_voice_controls
+                .clear();
         }
     }
 
@@ -214,19 +264,35 @@ impl ChatWidget {
             return false;
         }
         let display = realtime_delegation_display_text(input);
-        if parse_voice_approval_intent(&display).is_none() {
+        let Some(intent) = parse_voice_approval_intent(&display) else {
             return false;
-        }
-        let fingerprint = realtime_input_fingerprint(&display);
-        let consumed = &mut self.realtime_conversation.voice_controls.consumed_voice_controls;
-        let already_answered =
-            if let Some(index) = consumed.iter().position(|seen| *seen == fingerprint) {
-                consumed.remove(index);
-                true
-            } else {
-                false
-            };
-        if !already_answered && !self.handle_realtime_voice_approval(&display) {
+        };
+        let handled = if self.take_consumed_voice_control(VoiceControlSource::Transcript, intent) {
+            // The user's transcript already answered; this is its echo.
+            true
+        } else {
+            match intent {
+                // A refusal is safe to apply from the handoff. Remember it so the
+                // late transcript of the same words does not refuse the next prompt.
+                VoiceApprovalIntent::Deny | VoiceApprovalIntent::Abort => {
+                    let applied = self.handle_realtime_voice_approval(&display);
+                    if applied {
+                        self.remember_consumed_voice_control(VoiceControlSource::Handoff, intent);
+                    }
+                    applied
+                }
+                // Only the user's own transcript may arm or confirm an approval,
+                // so a model-authored "confirm" can never approve anything. While
+                // a prompt is open, hold the handoff back and let the transcript act.
+                VoiceApprovalIntent::Approve
+                | VoiceApprovalIntent::ApproveForSession
+                | VoiceApprovalIntent::Confirm => {
+                    self.voice_status_available()
+                        && self.bottom_pane.current_approval_request().is_some()
+                }
+            }
+        };
+        if !handled {
             return false;
         }
         let input_generation = self.realtime_conversation.input_generation;
@@ -240,12 +306,39 @@ impl ChatWidget {
         true
     }
 
-    fn remember_consumed_voice_control(&mut self, text: &str) {
-        let consumed = &mut self.realtime_conversation.voice_controls.consumed_voice_controls;
+    fn remember_consumed_voice_control(
+        &mut self,
+        source: VoiceControlSource,
+        intent: VoiceApprovalIntent,
+    ) {
+        let consumed = &mut self
+            .realtime_conversation
+            .voice_controls
+            .consumed_voice_controls;
         if consumed.len() >= MAX_CONSUMED_VOICE_CONTROLS {
             consumed.pop_front();
         }
-        consumed.push_back(realtime_input_fingerprint(text));
+        consumed.push_back(ConsumedVoiceControl { source, intent });
+    }
+
+    /// Remove and report one answer of `intent` previously handled by `source`.
+    fn take_consumed_voice_control(
+        &mut self,
+        source: VoiceControlSource,
+        intent: VoiceApprovalIntent,
+    ) -> bool {
+        let consumed = &mut self
+            .realtime_conversation
+            .voice_controls
+            .consumed_voice_controls;
+        let wanted = ConsumedVoiceControl { source, intent };
+        match consumed.iter().position(|seen| *seen == wanted) {
+            Some(index) => {
+                consumed.remove(index);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Speaking an approval answer must not orphan the answer of the voice turn
@@ -312,7 +405,8 @@ impl ChatWidget {
         };
         let pending = self
             .realtime_conversation
-            .voice_controls.voice_approval
+            .voice_controls
+            .voice_approval
             .take()
             .filter(|pending| pending.request_key == request_key);
         let Some(intent) = parse_voice_approval_intent(utterance) else {
@@ -353,10 +447,11 @@ impl ChatWidget {
                 } else {
                     confirmation_prompts[0].clone()
                 };
-                self.realtime_conversation.voice_controls.voice_approval = Some(PendingVoiceApproval {
-                    request_key,
-                    intent,
-                });
+                self.realtime_conversation.voice_controls.voice_approval =
+                    Some(PendingVoiceApproval {
+                        request_key,
+                        intent,
+                    });
                 self.add_info_message(prompt.clone(), /*hint*/ None);
                 self.speak_realtime_status(&prompt);
             }
@@ -371,6 +466,8 @@ impl ChatWidget {
                         "Denied."
                     });
                     self.after_voice_approval_decision();
+                } else {
+                    self.speak_realtime_status("That option is no longer available.");
                 }
             }
         }
