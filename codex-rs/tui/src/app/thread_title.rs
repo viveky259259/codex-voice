@@ -80,6 +80,26 @@ impl App {
                 .apply_thread_name_suggestion(thread_id, request_id, /*suggestion*/ None);
             return;
         }
+        // A Claude Code session has one `claude` process: the temporary
+        // thread/start a model-generated title needs would replace it and stop
+        // the running turn. Use the local fallback title instead.
+        if crate::agent_backend::is_claude_code() {
+            match destination {
+                ThreadTitleDestination::Automatic => {
+                    if !self.side_threads.contains_key(&thread_id)
+                        && let Some(title) = fallback_thread_title(source_text)
+                    {
+                        self.chat_widget.display_thread_name(thread_id, title);
+                    }
+                }
+                ThreadTitleDestination::RenameSuggestion { request_id } => {
+                    self.chat_widget.apply_thread_name_suggestion(
+                        thread_id, request_id, /*suggestion*/ None,
+                    );
+                }
+            }
+            return;
+        }
         let std::collections::hash_map::Entry::Vacant(entry) =
             self.pending_thread_titles.entry((thread_id, destination))
         else {

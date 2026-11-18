@@ -261,6 +261,13 @@ impl Worker {
             ClientRequest::ConfigRequirementsRead { .. } => {
                 Ok(serde_json::json!({ "requirements": null }))
             }
+            // The TUI reads config layers at startup to check folder trust.
+            // Claude Code has no Codex config layers, so report none.
+            ClientRequest::ConfigRead { .. } => Ok(serde_json::json!({
+                "config": {},
+                "origins": {},
+                "layers": [],
+            })),
             ClientRequest::ThreadStart { .. } => self.thread_start().await,
             ClientRequest::ThreadResume { params, .. } => self.thread_resume(params).await,
             ClientRequest::ThreadRead { params, .. } => ok(protocol::ThreadReadResponse {
