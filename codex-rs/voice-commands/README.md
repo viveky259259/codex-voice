@@ -118,7 +118,6 @@ voice` with `RUST_MIN_STACK=8388608`.
 
   ```rust
   } else if self.handle_realtime_voice_command(text) {
-      self.remember_consumed_voice_control(text);
       self.keep_in_flight_voice_turns(pre_utterance_generation);
   } else { ... }
   ```
@@ -138,11 +137,16 @@ voice` with `RUST_MIN_STACK=8388608`.
 - **The delegation path.** The realtime model may also hand the same
   utterance off as a `<realtime_delegation>` turn.
   `note_realtime_user_item_started` (realtime.rs, around line 712) calls
-  `consume_realtime_voice_control_handoff(turn_id, input)`, which currently
-  checks only `parse_voice_approval_intent(&display)`. Extend that check to
-  `|| parse_voice_command(&display, &ctx).is_command()`, so a handed-off
-  command is matched against `consumed_voice_controls` and hidden instead of
-  becoming a second prompt. The known gap from Lane A applies here too: core
+  `consume_realtime_voice_control_handoff(turn_id, input)`, which matches
+  only `parse_voice_approval_intent(&display)`. Add a second check:
+  `parse_voice_command(&display, &ctx).is_command()`. A handed-off command
+  is **never executed**, in line with Lane A's rule that only the user's own
+  transcript may arm or confirm an approval. Always swallow it (return true,
+  so it is hidden and does not become a second prompt), in either arrival
+  order. Only the user's transcript runs the command. While a voice command
+  is pending, also swallow a handed-off "confirm", "yes", or "no" without
+  acting on it; Lane A's handoff code holds a "confirm" back only while an
+  approval prompt is open. The known gap from Lane A applies here too: core
   has already appended the handed-off text to the turn.
 - `ChatWidget` cannot make app-server requests. Add an
   `AppEvent::VoiceCommand { thread_id, command: codex_voice_commands::VoiceCommand }`
