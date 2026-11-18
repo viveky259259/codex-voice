@@ -179,6 +179,8 @@ fn finish_turn(
 
 #[path = "realtime_tests/caption_replay.rs"]
 mod caption_replay;
+#[path = "realtime_tests/claude_code_approvals.rs"]
+mod claude_code_approvals;
 #[path = "realtime_tests/handoff_privacy.rs"]
 mod handoff_privacy;
 #[path = "realtime_tests/handoffs.rs"]

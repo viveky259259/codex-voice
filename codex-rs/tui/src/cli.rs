@@ -84,6 +84,15 @@ pub struct Cli {
     #[arg(long)]
     pub no_daemon: bool,
 
+    /// Agent that runs the session: `codex` (default) or `claude-code` (the
+    /// `claude` CLI with its own login; `-m` picks the Claude model).
+    #[arg(long = "agent", value_enum, default_value_t = AgentKind::Codex)]
+    pub agent: AgentKind,
+
+    /// The Claude Code executable for `--agent claude-code`.
+    #[arg(long = "claude-bin", value_name = "PATH", default_value = "claude")]
+    pub claude_bin: std::path::PathBuf,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }
@@ -100,6 +109,14 @@ impl std::ops::DerefMut for Cli {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.shared.0
     }
+}
+
+/// Which agent backend a TUI session runs on.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentKind {
+    #[default]
+    Codex,
+    ClaudeCode,
 }
 
 #[derive(Clone, Debug, Default)]

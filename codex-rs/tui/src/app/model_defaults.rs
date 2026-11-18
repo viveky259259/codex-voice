@@ -56,6 +56,14 @@ impl App {
     ) {
         self.app_event_tx
             .send(crate::app_event::AppEvent::FollowTranscript);
+        if crate::agent_backend::is_claude_code() {
+            // The session switched with `set_model`; Codex's saved default stays.
+            self.chat_widget.add_info_message(
+                format!("Claude Code model changed to {model}"),
+                /*hint*/ None,
+            );
+            return;
+        }
         match self
             .persist_model_defaults(
                 request_handle,

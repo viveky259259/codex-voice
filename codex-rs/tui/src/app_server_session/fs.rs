@@ -225,7 +225,7 @@ impl AppServerFileSystem {
     ) -> Result<T> {
         let request_id = RequestId::String(format!("tui-fs-{}", Uuid::new_v4()));
         match &self.request_handle {
-            AppServerRequestHandle::Cloud(_) => Err(color_eyre::eyre::eyre!(
+            AppServerRequestHandle::AgentBackend(_) | AppServerRequestHandle::Cloud(_) => Err(color_eyre::eyre::eyre!(
                 "{method} is unavailable for this backend"
             )),
             AppServerRequestHandle::Remote(handle) => {
