@@ -55,7 +55,7 @@ test it. This request tests the audio engine on its own with its CLI.
 
    ```toml
    [capture]
-   command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
+   command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
               "-i", ":{device}", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
    device = "0"
 
@@ -72,23 +72,19 @@ test it. This request tests the audio engine on its own with its CLI.
 
 4. Save as `codex-rs/voice-mcp.toml` (local-agents MCP at
    http://127.0.0.1:5051/mcp for both directions). Start the server first with
-   `uv run mcp_server.py --transport streamable-http`. The tool and argument
-   names below are guesses, because `mcp_server.py` isn't pushed to
-   viveky259259/local-agents. Fix them from the output of
-   `cargo run -p codex-local-voice -- tools http://127.0.0.1:5051/mcp`.
+   `uv run mcp_server.py --transport streamable-http`. The tool names and model ids below were confirmed on the Mac (issue #12).
 
    ```toml
    [capture]
-   command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
+   command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
               "-i", ":{device}", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
    device = "0"
 
    [stt]
    backend = "mcp"
    url = "http://127.0.0.1:5051/mcp"
-   tool = "transcribe"
-   arguments = { model_id = "whisper:base", input_path = "{wav}" }
-   # text_path = "result.text"
+   tool = "submit_inference"
+   arguments = { model_id = "hf:mlx-community/whisper-base-mlx", input_path = "{wav}", options = { language = "en" } }
 
    [stt.job]
    tool = "get_job"
@@ -99,14 +95,14 @@ test it. This request tests the audio engine on its own with its CLI.
    [tts]
    backend = "mcp"
    url = "http://127.0.0.1:5051/mcp"
-   tool = "speak"
-   arguments = { model_id = "hf:mlx-community/Kokoro-82M-8bit", voice = "af_heart", text = "{text}" }
-   # audio_path = "artifacts.0.path"
-   # artifact_dir = "/path/to/local-agents/artifacts"
+   tool = "submit_inference"
+   arguments = { model_id = "hf:mlx-community/Kokoro-82M-8bit", prompt = "{text}", options = { voice = "af_heart", language = "en" } }
 
    [tts.job]
    tool = "get_job"
    arguments = { job_id = "{job_id}" }
+   poll_interval_ms = 250
+   timeout_ms = 120000
 
    [playback]
    player = ["afplay", "{wav}"]
