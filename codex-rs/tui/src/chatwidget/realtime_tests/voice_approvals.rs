@@ -190,7 +190,12 @@ async fn spoken_approve_waits_for_confirm_then_applies_once() {
         vec![("exec-1", &CommandExecutionApprovalDecision::Accept)]
     );
     assert!(chat.bottom_pane.current_approval_request().is_none());
-    assert!(chat.realtime_conversation.voice_controls.voice_approval.is_none());
+    assert!(
+        chat.realtime_conversation
+            .voice_controls
+            .voice_approval
+            .is_none()
+    );
     assert_eq!(spoken(&mut ops), Vec::<String>::new());
 }
 
@@ -260,7 +265,12 @@ async fn any_other_utterance_cancels_a_pending_voice_approval() {
     spoken(&mut ops);
     say(&mut chat, "what does that command delete exactly");
     assert_eq!(spoken(&mut ops), vec!["Approval cancelled.".to_string()]);
-    assert!(chat.realtime_conversation.voice_controls.voice_approval.is_none());
+    assert!(
+        chat.realtime_conversation
+            .voice_controls
+            .voice_approval
+            .is_none()
+    );
 
     // A late "confirm" cannot resurrect the cancelled approval.
     say(&mut chat, "confirm");
@@ -389,10 +399,16 @@ async fn negated_and_long_phrases_are_not_approval_answers() {
     ] {
         say(&mut chat, utterance);
         assert_eq!(spoken(&mut ops), Vec::<String>::new(), "{utterance}");
-        assert!(chat.realtime_conversation.voice_controls.voice_approval.is_none());
         assert!(
             chat.realtime_conversation
-                .voice_controls.consumed_voice_controls
+                .voice_controls
+                .voice_approval
+                .is_none()
+        );
+        assert!(
+            chat.realtime_conversation
+                .voice_controls
+                .consumed_voice_controls
                 .is_empty()
         );
     }
@@ -453,7 +469,8 @@ async fn approval_utterances_are_not_treated_as_new_voice_requests() {
     }
     assert!(
         chat.realtime_conversation
-            .voice_controls.consumed_voice_controls
+            .voice_controls
+            .consumed_voice_controls
             .is_empty()
     );
 
@@ -487,7 +504,8 @@ async fn ordinary_speech_after_an_answer_is_still_handed_off_normally() {
     say(&mut chat, "never mind, what time is it");
     assert!(
         chat.realtime_conversation
-            .voice_controls.consumed_voice_controls
+            .voice_controls
+            .consumed_voice_controls
             .is_empty()
     );
 
@@ -520,5 +538,168 @@ async fn a_failed_turn_is_summarized_aloud() {
     assert_eq!(
         spoken(&mut ops),
         vec!["Codex hit an error: stream disconnected before completion.".to_string()]
+    );
+}
+
+/// The voice model handing the user's words off as a delegated turn.
+fn hand_off(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, text: &str) {
+    start_item(
+        chat,
+        thread_id,
+        turn_id,
+        user_item(&format!(
+            "<realtime_delegation><input>{text}</input></realtime_delegation>"
+        )),
+    );
+}
+
+#[tokio::test]
+async fn one_spoken_refusal_answers_one_prompt_whichever_copy_arrives_first() {
+    for handoff_first in [true, false] {
+        let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+        let thread_id = activate_voice(&mut chat);
+        chat.push_approval_request(exec_approval(thread_id, "exec-1", "ls", &ALL_DECISIONS));
+        chat.push_approval_request(exec_approval(thread_id, "exec-2", "pwd", &ALL_DECISIONS));
+        spoken(&mut ops);
+
+        if handoff_first {
+            hand_off(&mut chat, thread_id, "handoff-no", "no");
+            say(&mut chat, "No.");
+        } else {
+            say(&mut chat, "No.");
+            hand_off(&mut chat, thread_id, "handoff-no", "no");
+        }
+
+        let (submitted, _) = drain_events(&mut chat, &mut events);
+        assert_eq!(
+            submitted
+                .iter()
+                .filter_map(exec_decision)
+                .collect::<Vec<_>>(),
+            vec![("exec-1", &CommandExecutionApprovalDecision::Decline)],
+            "handoff_first={handoff_first}"
+        );
+        assert!(
+            chat.bottom_pane.current_approval_request().is_some(),
+            "exec-2 must still be waiting, handoff_first={handoff_first}"
+        );
+        assert!(chat.should_hide_realtime_delegation("handoff-no"));
+    }
+}
+
+#[tokio::test]
+async fn two_spoken_refusals_answer_two_prompts() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let thread_id = activate_voice(&mut chat);
+    chat.push_approval_request(exec_approval(thread_id, "exec-1", "ls", &ALL_DECISIONS));
+    chat.push_approval_request(exec_approval(thread_id, "exec-2", "pwd", &ALL_DECISIONS));
+    spoken(&mut ops);
+
+    // Both transcripts arrive before either handoff.
+    say(&mut chat, "no");
+    say(&mut chat, "no");
+    hand_off(&mut chat, thread_id, "handoff-1", "no");
+    hand_off(&mut chat, thread_id, "handoff-2", "no");
+
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert_eq!(
+        submitted
+            .iter()
+            .filter_map(exec_decision)
+            .collect::<Vec<_>>(),
+        vec![
+            ("exec-1", &CommandExecutionApprovalDecision::Decline),
+            ("exec-2", &CommandExecutionApprovalDecision::Decline),
+        ]
+    );
+    assert!(chat.should_hide_realtime_delegation("handoff-1"));
+    assert!(chat.should_hide_realtime_delegation("handoff-2"));
+}
+
+#[tokio::test]
+async fn handoff_first_approval_is_confirmed_once_by_the_transcript() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let thread_id = activate_voice(&mut chat);
+    chat.push_approval_request(exec_approval(
+        thread_id,
+        "exec-1",
+        "cargo test",
+        &ALL_DECISIONS,
+    ));
+    chat.push_approval_request(exec_approval(thread_id, "exec-2", "pwd", &ALL_DECISIONS));
+    spoken(&mut ops);
+
+    hand_off(&mut chat, thread_id, "handoff-approve", "Approve.");
+    assert_eq!(spoken(&mut ops), Vec::<String>::new());
+    say(&mut chat, "Approve.");
+    assert_eq!(
+        spoken(&mut ops),
+        vec!["Approve cargo test? Say confirm.".to_string()]
+    );
+
+    hand_off(&mut chat, thread_id, "handoff-confirm", "Confirm.");
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert!(submitted.is_empty(), "{submitted:?}");
+    say(&mut chat, "Confirm.");
+
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert_eq!(
+        submitted
+            .iter()
+            .filter_map(exec_decision)
+            .collect::<Vec<_>>(),
+        vec![("exec-1", &CommandExecutionApprovalDecision::Accept)]
+    );
+    let speech = spoken(&mut ops);
+    assert!(
+        !speech.iter().any(|line| line.contains("Say approve first")),
+        "{speech:?}"
+    );
+    for turn in ["handoff-approve", "handoff-confirm"] {
+        assert!(chat.should_hide_realtime_delegation(turn), "{turn}");
+    }
+}
+
+#[tokio::test]
+async fn a_model_authored_confirm_never_approves() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let thread_id = activate_voice(&mut chat);
+    chat.push_approval_request(exec_approval(
+        thread_id,
+        "exec-1",
+        "git push --force",
+        &ALL_DECISIONS,
+    ));
+    say(&mut chat, "approve");
+    drain_events(&mut chat, &mut events);
+    spoken(&mut ops);
+
+    // The model says "confirm" on the user's behalf; the user never did.
+    hand_off(&mut chat, thread_id, "handoff-confirm", "confirm");
+
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert!(submitted.is_empty(), "{submitted:?}");
+    assert!(chat.bottom_pane.current_approval_request().is_some());
+}
+
+#[tokio::test]
+async fn a_refusal_that_cannot_apply_says_so() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let thread_id = activate_voice(&mut chat);
+    chat.push_approval_request(exec_approval(
+        thread_id,
+        "exec-1",
+        "ls",
+        &[CommandExecutionApprovalDecision::Accept],
+    ));
+    spoken(&mut ops);
+
+    say(&mut chat, "no");
+
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert!(submitted.is_empty(), "{submitted:?}");
+    assert_eq!(
+        spoken(&mut ops),
+        vec!["That option is no longer available.".to_string()]
     );
 }

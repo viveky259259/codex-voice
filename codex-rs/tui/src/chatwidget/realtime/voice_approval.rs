@@ -40,7 +40,6 @@ const NEGATIONS: &[&str] = &[
     "not",
     "don't",
     "dont",
-    "do't",
     "never",
     "can't",
     "cant",
@@ -254,12 +253,20 @@ pub(crate) fn approval_action_summary(request: &ApprovalRequest) -> ApprovalActi
                 (format!("reach {host}"), format!("network access to {host}"))
             } else {
                 let command = strip_bash_lc_and_escape(&request.command);
-                let mut lines = command.lines();
-                let mut summary = limit_summary(lines.next().unwrap_or_default());
-                if lines.next().is_some() && !summary.ends_with('…') {
-                    summary.push('…');
+                let mut lines = command
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty());
+                match lines.next() {
+                    Some(first_line) => {
+                        let mut summary = limit_summary(first_line);
+                        if lines.next().is_some() && !summary.ends_with('…') {
+                            summary.push('…');
+                        }
+                        (format!("run {summary}"), summary)
+                    }
+                    None => ("run a command".to_string(), "a command".to_string()),
                 }
-                (format!("run {summary}"), summary)
             }
         }
         ApprovalRequest::ApplyPatch(request) => {
@@ -331,16 +338,28 @@ pub(crate) fn approval_confirmation_prompt(
     )
 }
 
+/// The text up to the first `.`, `!` or `?` that ends a sentence, meaning one
+/// followed by whitespace or the end of the text. Dots inside model names,
+/// versions, file names and URLs (`gpt-5.1-codex`, `config.toml`) don't count.
+fn first_sentence(text: &str) -> &str {
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if matches!(ch, '.' | '!' | '?')
+            && chars.peek().is_none_or(|(_, next)| next.is_whitespace())
+        {
+            return &text[..index + ch.len_utf8()];
+        }
+    }
+    text
+}
+
 /// Spoken when a turn fails during a voice conversation.
 pub(crate) fn turn_error_speech(message: &str) -> String {
     let first_line = message.lines().find(|line| !line.trim().is_empty());
     let Some(first_line) = first_line else {
         return "Codex hit an error.".to_string();
     };
-    let sentence = first_line
-        .split_inclusive(['.', '!', '?'])
-        .next()
-        .unwrap_or(first_line)
+    let sentence = first_sentence(first_line)
         .trim()
         .trim_end_matches(['.', '!', '?']);
     limit_words(
