@@ -8,7 +8,23 @@ entry under "## Mac outbox" below with the request id, what you ran, and the
 results (exact `test result:` lines, errors, log tails), then commit and push to
 `wip`. The cloud session polls `wip`.
 
-### 2026-11-18 #1: standalone local voice (no TUI yet)
+**Tickets.** Work is now tracked as GitHub issues. The tracker is
+https://github.com/viveky259259/codex-voice/issues/25, and each issue has a
+status label. Issues labelled `status: ready for Mac test` contain their own
+test steps. Report results as a comment on the issue: on success, set
+`status: verified on Mac` and close it. The outbox below still works if you
+can't comment on issues.
+
+### 2026-11-18 #2: three tickets are ready for Mac test
+
+- #12, the local voice engine: request #1 below has the steps.
+- #14, Claude via codex-anthropic-proxy: needs ANTHROPIC_API_KEY.
+- #19, `codex remote list/attach` on a real tailnet: needs a second machine.
+
+Do #12 first. #13 (local voice in the TUI) is still being built, and #17, #18,
+#20 and #21 wait on it.
+
+### 2026-11-18 #1 (issue #12): standalone local voice (no TUI yet)
 
 Status: the TUI wiring of local voice (`[realtime] backend = "local"`) is being
 built in the cloud now. Until it lands, `/voice` still uses OpenAI realtime and
