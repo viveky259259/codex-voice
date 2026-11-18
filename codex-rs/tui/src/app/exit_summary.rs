@@ -63,6 +63,7 @@ impl App {
                         RemoteAppServerEndpoint::UnixSocket { socket_path } => {
                             format!("unix://{}", socket_path.display())
                         }
+                        RemoteAppServerEndpoint::Ssh { target } => target.display_url(),
                     };
                     vec!["codex".to_string(), "--remote".to_string(), address]
                 }

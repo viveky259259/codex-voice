@@ -73,11 +73,89 @@ fn resolve_remote_addr_rejects_invalid_remote_addresses() {
         let err = resolve_remote_addr(addr).expect_err("invalid remote addresses should fail");
         assert!(
             err.to_string().contains(
-                "expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+                "expected `ws://host:port`, `wss://host:port`, `unix://`, `unix://PATH`, or `ssh://[user@]host[:port]`"
             )
         );
     }
 }
+#[test]
+fn resolve_remote_addr_accepts_ssh_targets() {
+    let cases = [
+        ("ssh://devbox", None, "devbox", None, None),
+        (
+            "ssh://me@devbox.tail1234.ts.net:2222",
+            Some("me"),
+            "devbox.tail1234.ts.net",
+            Some(2222),
+            None,
+        ),
+        ("ssh://100.64.0.2/", None, "100.64.0.2", None, None),
+        (
+            "ssh://[fd7a:115c:a1e0::2]:22",
+            None,
+            "fd7a:115c:a1e0::2",
+            Some(22),
+            None,
+        ),
+        (
+            "ssh://devbox?codex_bin=%2Fopt%2Fcodex%20dev%2Fcodex",
+            None,
+            "devbox",
+            None,
+            Some("/opt/codex dev/codex"),
+        ),
+    ];
+    for (addr, user, host, port, remote_codex_bin) in cases {
+        let endpoint = resolve_remote_addr(addr).expect("ssh address should parse");
+        assert_eq!(
+            endpoint,
+            RemoteAppServerEndpoint::Ssh {
+                target: SshTarget {
+                    user: user.map(str::to_string),
+                    host: host.to_string(),
+                    port,
+                    remote_codex_bin: remote_codex_bin.map(str::to_string),
+                    ssh_program: None,
+                },
+            },
+            "{addr}"
+        );
+        let RemoteAppServerEndpoint::Ssh { target } = endpoint else {
+            unreachable!();
+        };
+        assert_eq!(
+            resolve_remote_addr(&target.display_url()).expect("display URL should round-trip"),
+            RemoteAppServerEndpoint::Ssh { target },
+            "{addr}"
+        );
+    }
+}
+
+#[test]
+fn resolve_remote_addr_rejects_invalid_ssh_targets() {
+    for (addr, reason) in [
+        ("ssh://", "missing host"),
+        ("ssh://-oProxyCommand=evil", "start with `-`"),
+        ("ssh://me:secret@devbox", "passwords are not supported"),
+        ("ssh://devbox/home/me", "paths and fragments"),
+        ("ssh://devbox?cmd=rm", "unsupported query parameter `cmd`"),
+        ("ssh://devbox:99999", "invalid remote address"),
+    ] {
+        let err = resolve_remote_addr(addr).expect_err("invalid ssh addresses should fail");
+        assert!(err.to_string().contains(reason), "{addr}: {err}");
+    }
+}
+
+#[test]
+fn resolve_remote_endpoint_refuses_auth_tokens_over_ssh() {
+    let err = resolve_remote_endpoint(
+        Some("ssh://devbox".to_string()),
+        Some("CODEX_TEST_UNUSED_TOKEN_ENV".to_string()),
+    )
+    .expect_err("tokens are never sent over ssh");
+    assert!(err.to_string().contains("SSH authenticates"), "{err}");
+}
+
 #[test]
 fn read_remote_auth_token_from_env_var_reports_missing_values() {
     let err = read_remote_auth_token_from_env_var_with("CODEX_REMOTE_AUTH_TOKEN", |_| {

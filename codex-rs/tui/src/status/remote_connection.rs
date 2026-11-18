@@ -46,6 +46,7 @@ pub(crate) fn remote_connection_status_value(
         RemoteAppServerEndpoint::UnixSocket { socket_path } => {
             format!("unix://{}", socket_path.display())
         }
+        RemoteAppServerEndpoint::Ssh { target } => target.display_url(),
     };
     let version = server_version
         .map(|version| format!("v{version}"))
@@ -112,6 +113,9 @@ pub(crate) fn server_version_notice_key(
                 b"unix:",
                 socket_path.as_path().as_os_str().as_encoded_bytes(),
             );
+        }
+        Some(RemoteAppServerEndpoint::Ssh { target }) => {
+            hash_identity_part(&mut hasher, b"ssh:", target.display_url().as_bytes());
         }
         Some(RemoteAppServerEndpoint::WebSocket { websocket_url, .. }) => {
             if let Ok(mut url) = Url::parse(websocket_url) {

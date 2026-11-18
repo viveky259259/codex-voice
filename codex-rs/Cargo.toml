@@ -117,6 +117,7 @@ members = [
     "response-debug-context",
     "sandboxing",
     "stdio-to-uds",
+    "tailnet",
     "otel",
     "otel-trace-websocket",
     "tcp-tunnel",
@@ -308,6 +309,7 @@ codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
+codex-tailnet = { path = "tailnet" }
 codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
 codex-thread-store = { path = "thread-store" }
