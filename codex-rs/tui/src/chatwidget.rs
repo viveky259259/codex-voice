@@ -373,6 +373,8 @@ pub(crate) use realtime::is_private_realtime_agent_item;
 pub(crate) use realtime::realtime_delegation_display_text;
 pub(crate) use realtime::realtime_delegation_input;
 #[cfg(test)]
+pub(crate) use realtime::set_realtime_voice_supported_for_test;
+#[cfg(test)]
 pub(crate) use realtime::tests::activate_voice_for_thread;
 #[cfg(test)]
 pub(crate) use realtime::tests::commit_realtime_history_events;

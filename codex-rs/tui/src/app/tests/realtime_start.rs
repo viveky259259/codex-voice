@@ -253,3 +253,63 @@ async fn voice_mute_shortcut_reaches_the_active_widget() -> Result<()> {
     server.shutdown().await?;
     Ok(())
 }
+
+fn drain_history(events: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> String {
+    std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(
+                cell.display_lines(/*width*/ 200)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn voice_auto_start_runs_once_per_process_for_the_first_thread() -> Result<()> {
+    for auto_start in [false, true] {
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+        app.chat_widget.set_realtime_auto_start_for_test(auto_start);
+        crate::chatwidget::set_realtime_voice_supported_for_test(Some(false));
+        let thread_id = ThreadId::new();
+        app.chat_widget
+            .handle_thread_session_quiet(test_thread_session(
+                thread_id,
+                app.config.cwd.to_path_buf(),
+            ));
+        let requests: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::VoiceControl {
+                    thread_id,
+                    control: crate::app_event::VoiceControl::AutoStart,
+                } => Some(thread_id),
+                _ => None,
+            })
+            .collect();
+        if !auto_start {
+            assert_eq!(requests, Vec::new());
+            crate::chatwidget::set_realtime_voice_supported_for_test(None);
+            continue;
+        }
+        assert_eq!(requests, vec![Some(thread_id)]);
+
+        // A second thread (or a repeated request) does not auto-start again.
+        app.control_voice(crate::app_event::VoiceControl::AutoStart);
+        app.control_voice(crate::app_event::VoiceControl::AutoStart);
+        crate::chatwidget::set_realtime_voice_supported_for_test(None);
+
+        let history = drain_history(&mut events);
+        assert_eq!(
+            history.matches("Voice auto-start skipped").count(),
+            1,
+            "{history}"
+        );
+        assert!(!app.chat_widget.realtime_conversation_is_running());
+    }
+    Ok(())
+}

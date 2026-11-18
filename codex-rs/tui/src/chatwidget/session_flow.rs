@@ -113,7 +113,7 @@ impl ChatWidget {
             });
         }
         self.realtime_conversation_available_for_thread =
-            codex_realtime_webrtc::RealtimeWebrtcSession::is_supported();
+            super::realtime::realtime_voice_supported();
         self.bottom_pane
             .set_voice_command_enabled(self.realtime_conversation_available_for_thread);
         self.bottom_pane
@@ -286,6 +286,11 @@ impl ChatWidget {
             && let Some(forked_from_id) = forked_from_id
         {
             self.emit_forked_thread_event(forked_from_id, fork_parent_title);
+        }
+        if previous_thread_id != self.thread_id
+            && display != SessionConfiguredDisplay::SideConversation
+        {
+            self.request_realtime_auto_start();
         }
         if !self.suppress_session_configured_redraw {
             self.request_redraw();

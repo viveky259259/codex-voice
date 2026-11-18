@@ -1069,6 +1069,7 @@ See the Codex keymap documentation for supported actions and examples."
             realtime_replay_order: VecDeque::new(),
             background_voice: None,
             background_voice_error: None,
+            voice_auto_start_attempted: false,
             temporary_structured_requests: HashMap::new(),
             cloud_title_shutdown: Default::default(),
             pending_thread_titles: HashMap::new(),

@@ -4615,6 +4615,10 @@
     "RealtimeToml": {
       "additionalProperties": false,
       "properties": {
+        "auto_start": {
+          "description": "Start a voice conversation automatically once the TUI's first thread exists. Defaults to `false`; voice-first setups set it to `true`.",
+          "type": "boolean"
+        },
         "transport": {
           "$ref": "#/definitions/RealtimeTransport"
         },

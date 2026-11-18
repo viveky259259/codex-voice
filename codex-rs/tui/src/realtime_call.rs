@@ -32,6 +32,17 @@ pub(crate) struct CreatedCall {
     pub(crate) answer_sdp: RealtimeSdp,
 }
 
+/// The TUI answers approval prompts from the user's own transcript. Ask the
+/// voice model not to hand those short replies to Codex as new requests.
+const VOICE_APPROVAL_INSTRUCTIONS: &str = "When Codex is waiting for the user to approve an action, this client handles short spoken replies such as approve, yes, allow, go ahead, confirm, deny, no, reject, or stop by itself. Do not hand those replies off to Codex; wait for the client to speak the outcome.";
+
+fn with_voice_approval_instructions(instructions: String) -> String {
+    if instructions.trim().is_empty() {
+        return instructions;
+    }
+    format!("{instructions}\n\n{VOICE_APPROVAL_INSTRUCTIONS}")
+}
+
 pub(crate) async fn create(
     config: &Config,
     thread: &Thread,
@@ -73,10 +84,10 @@ pub(crate) async fn create(
     );
     add_originator_header(&mut headers, &originator().value);
     let session = RealtimeSessionConfig {
-        instructions: prepare_realtime_backend_prompt(
+        instructions: with_voice_approval_instructions(prepare_realtime_backend_prompt(
             /*prompt*/ None,
             config.experimental_realtime_ws_backend_prompt.clone(),
-        ),
+        )),
         initial_items: Vec::new(),
         delegation_ack_filler: None,
         model: Some(

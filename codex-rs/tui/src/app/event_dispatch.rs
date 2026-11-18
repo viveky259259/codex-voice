@@ -12,6 +12,7 @@ use super::*;
 use crate::app_event::CapturedSideStream;
 use crate::app_event::RecapTrigger;
 use crate::app_event::ThreadTitleDestination;
+use crate::app_event::VoiceControl;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::app_server_session::ThreadSettingsOwner;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
@@ -2564,6 +2565,11 @@ impl App {
             }
             AppEvent::RealtimeConversationStateChanged => {
                 self.repaint_agents_overview();
+            }
+            AppEvent::VoiceControl { thread_id, control: VoiceControl::AutoStart } => {
+                if thread_id.is_some() && thread_id == self.chat_widget.thread_id() {
+                    self.control_voice(VoiceControl::AutoStart);
+                }
             }
             AppEvent::VoiceControl { thread_id, control } => {
                 if thread_id == self.chat_widget.thread_id() || self.voice_owner_thread_id().is_some() {

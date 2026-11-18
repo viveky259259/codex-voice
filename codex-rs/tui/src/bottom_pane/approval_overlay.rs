@@ -153,6 +153,23 @@ impl ApprovalRequest {
         }
     }
 
+    /// Stable identity used to tie a spoken confirmation to one prompt.
+    pub(crate) fn voice_key(&self) -> String {
+        match self {
+            ApprovalRequest::Exec(request) => format!("exec:{}:{}", request.thread_id, request.id),
+            ApprovalRequest::Permissions(request) => {
+                format!("permissions:{}:{}", request.thread_id, request.call_id)
+            }
+            ApprovalRequest::ApplyPatch(request) => {
+                format!("patch:{}:{}", request.thread_id, request.id)
+            }
+            ApprovalRequest::McpElicitation(request) => format!(
+                "elicitation:{}:{}:{}",
+                request.thread_id, request.server_name, request.request_id
+            ),
+        }
+    }
+
     pub(super) fn matches_resolved_request(&self, request: &ResolvedAppServerRequest) -> bool {
         match (self, request) {
             (
@@ -180,6 +197,18 @@ impl ApprovalRequest {
             _ => false,
         }
     }
+}
+
+/// A decision chosen by voice instead of a key press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VoiceApprovalDecision {
+    ApproveOnce,
+    ApproveForSession,
+    /// Decline and let the turn continue; falls back to aborting when the
+    /// prompt has no plain decline option.
+    Deny,
+    /// Decline and stop the turn.
+    Abort,
 }
 
 /// Modal overlay asking the user to approve or deny one or more requests.
@@ -511,6 +540,68 @@ impl ApprovalOverlay {
         );
     }
 
+    fn voice_option_index(&self, decision: VoiceApprovalDecision) -> Option<usize> {
+        if self.current_complete || self.done || self.current_request.is_none() {
+            return None;
+        }
+        let matches = |decision: VoiceApprovalDecision, option: &ApprovalDecision| {
+            use VoiceApprovalDecision::*;
+            match (decision, option) {
+                (ApproveOnce, ApprovalDecision::Command(choice)) => {
+                    *choice == CommandExecutionApprovalDecision::Accept
+                }
+                (ApproveOnce, ApprovalDecision::FileChange(choice)) => {
+                    *choice == FileChangeApprovalDecision::Accept
+                }
+                (ApproveOnce, ApprovalDecision::Permissions(choice)) => {
+                    matches!(choice, PermissionsDecision::GrantForTurn)
+                }
+                (ApproveOnce, ApprovalDecision::McpElicitation(choice)) => {
+                    *choice == McpServerElicitationAction::Accept
+                }
+                (ApproveForSession, ApprovalDecision::Command(choice)) => {
+                    *choice == CommandExecutionApprovalDecision::AcceptForSession
+                }
+                (ApproveForSession, ApprovalDecision::FileChange(choice)) => {
+                    *choice == FileChangeApprovalDecision::AcceptForSession
+                }
+                (ApproveForSession, ApprovalDecision::Permissions(choice)) => {
+                    matches!(choice, PermissionsDecision::GrantForSession)
+                }
+                (ApproveForSession, ApprovalDecision::McpElicitation(_)) => false,
+                (Deny, ApprovalDecision::Command(choice)) => {
+                    *choice == CommandExecutionApprovalDecision::Decline
+                }
+                (Deny, ApprovalDecision::McpElicitation(choice)) => {
+                    *choice == McpServerElicitationAction::Decline
+                }
+                (Deny | Abort, ApprovalDecision::Permissions(choice)) => {
+                    matches!(choice, PermissionsDecision::Deny)
+                }
+                (Deny, ApprovalDecision::FileChange(_)) => false,
+                (Abort, ApprovalDecision::Command(choice)) => {
+                    *choice == CommandExecutionApprovalDecision::Cancel
+                }
+                (Abort, ApprovalDecision::FileChange(choice)) => {
+                    *choice == FileChangeApprovalDecision::Cancel
+                }
+                (Abort, ApprovalDecision::McpElicitation(choice)) => {
+                    *choice == McpServerElicitationAction::Cancel
+                }
+            }
+        };
+        let find = |decision| {
+            self.options
+                .iter()
+                .position(|option| matches(decision, &option.decision))
+        };
+        find(decision).or_else(|| {
+            (decision == VoiceApprovalDecision::Deny)
+                .then(|| find(VoiceApprovalDecision::Abort))
+                .flatten()
+        })
+    }
+
     fn advance_queue(&mut self) {
         if let Some(next) = self.queue.pop() {
             self.set_current(next);
@@ -637,6 +728,25 @@ impl BottomPaneView for ApprovalOverlay {
     ) -> Option<ApprovalRequest> {
         self.enqueue_request(request);
         None
+    }
+
+    fn current_approval_request(&self) -> Option<&ApprovalRequest> {
+        if self.current_complete || self.done {
+            return None;
+        }
+        self.current_request.as_ref()
+    }
+
+    fn offers_voice_approval(&self, decision: VoiceApprovalDecision) -> bool {
+        self.voice_option_index(decision).is_some()
+    }
+
+    fn apply_voice_approval(&mut self, decision: VoiceApprovalDecision) -> bool {
+        let Some(index) = self.voice_option_index(decision) else {
+            return false;
+        };
+        self.apply_selection(index);
+        true
     }
 
     fn dismiss_app_server_request(&mut self, request: &ResolvedAppServerRequest) -> bool {

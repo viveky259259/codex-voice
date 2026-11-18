@@ -305,8 +305,7 @@ impl ChatWidget {
             network_approval_context: ev.network_approval_context,
             additional_permissions: ev.additional_permissions,
         });
-        self.bottom_pane
-            .push_approval_request(request, &self.config.features);
+        self.push_bottom_pane_approval_request(request);
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Waiting,
             /*body*/ None,
@@ -326,8 +325,7 @@ impl ChatWidget {
             changes: ev.changes,
             cwd: self.config.cwd.clone(),
         });
-        self.bottom_pane
-            .push_approval_request(request, &self.config.features);
+        self.push_bottom_pane_approval_request(request);
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Waiting,
             /*body*/ None,
@@ -378,8 +376,7 @@ impl ChatWidget {
                         request_id,
                         message,
                     });
-                    self.bottom_pane
-                        .push_approval_request(request, &self.config.features);
+                    self.push_bottom_pane_approval_request(request);
                 }
                 McpServerElicitationRequest::UserVerification {
                     title, description, ..
@@ -417,9 +414,19 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn push_approval_request(&mut self, request: ApprovalRequest) {
+    /// Show an approval prompt and, during a voice conversation, describe it aloud
+    /// when it becomes the visible prompt.
+    fn push_bottom_pane_approval_request(&mut self, request: ApprovalRequest) {
+        let had_visible_prompt = self.bottom_pane.current_approval_request().is_some();
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
+        if !had_visible_prompt {
+            self.announce_realtime_approval_request();
+        }
+    }
+
+    pub(crate) fn push_approval_request(&mut self, request: ApprovalRequest) {
+        self.push_bottom_pane_approval_request(request);
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Waiting,
             /*body*/ None,
@@ -483,8 +490,7 @@ impl ChatWidget {
             reason: ev.reason,
             permissions: ev.permissions,
         });
-        self.bottom_pane
-            .push_approval_request(request, &self.config.features);
+        self.push_bottom_pane_approval_request(request);
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Waiting,
             /*body*/ None,

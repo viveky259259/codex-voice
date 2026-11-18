@@ -7,6 +7,8 @@ mod failure_metrics;
 mod recording_controls;
 mod session_lock;
 mod transcript_replay;
+mod voice_approval;
+mod voice_status;
 
 pub(crate) use failure_metrics::RealtimeFailureCause;
 
@@ -183,6 +185,8 @@ pub(super) struct RealtimeConversationUiState {
     delegated_reasoning_turns: VecDeque<String>,
     pub(super) agent_items: HashMap<(String, String), RealtimeAgentItemOrigin>,
     pending_speech: VecDeque<PendingRealtimeSpeech>,
+    // Boxed so voice-first state does not grow every `ChatWidget` move.
+    voice_controls: Box<voice_status::VoiceControlState>,
 }
 
 impl RealtimeConversationUiState {
@@ -244,6 +248,27 @@ pub(crate) fn realtime_delegation_display_text(input: &str) -> String {
         .replace("&amp;", "&")
 }
 
+#[cfg(test)]
+thread_local! {
+    static VOICE_SUPPORT_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether this build can run local voice media.
+pub(crate) fn realtime_voice_supported() -> bool {
+    #[cfg(test)]
+    if let Some(supported) = VOICE_SUPPORT_OVERRIDE.with(std::cell::Cell::get) {
+        return supported;
+    }
+    RealtimeWebrtcSession::is_supported()
+}
+
+/// Pretend the voice runtime is (or is not) packaged on this test thread.
+#[cfg(test)]
+pub(crate) fn set_realtime_voice_supported_for_test(supported: Option<bool>) {
+    VOICE_SUPPORT_OVERRIDE.with(|cell| cell.set(supported));
+}
+
 fn realtime_input_fingerprint(input: &str) -> (usize, u64) {
     let input = input.trim();
     let mut hasher = DefaultHasher::new();
@@ -294,7 +319,7 @@ impl ChatWidget {
             return;
         }
 
-        if !RealtimeWebrtcSession::is_supported() {
+        if !realtime_voice_supported() {
             self.add_error_message(
                 "Voice requires macOS, an MSVC-based Windows build, or a glibc-based Linux build."
                     .to_string(),
@@ -687,6 +712,9 @@ impl ChatWidget {
         if let Some(input) = realtime_delegation_input(items)
             && !matches_local_typed_input
         {
+            if self.consume_realtime_voice_control_handoff(turn_id, input) {
+                return;
+            }
             let transcript_tail_flush = items.iter().any(|item| {
                 matches!(item, UserInput::Text { text, .. }
                     if text.contains("<source>transcript_tail_flush</source>"))
@@ -1105,6 +1133,26 @@ impl ChatWidget {
             .pending_speech
             .iter()
             .any(|delivery| delivery.state == PendingSpeechState::Queued(delivery_id))
+            || self.is_realtime_status_speech(delivery_id)
+    }
+
+    /// Whether a queued speech request still belongs to the live call.
+    ///
+    /// Status prompts are spoken for the call itself, so a newer voice or typed
+    /// input does not make them stale; answers must still match their input.
+    pub(crate) fn may_deliver_realtime_speech(
+        &self,
+        thread_id: ThreadId,
+        attempt_id: u64,
+        input_generation: u64,
+        delivery_id: u64,
+    ) -> bool {
+        if self.is_realtime_status_speech(delivery_id) {
+            return self.realtime_conversation.phase == RealtimeConversationPhase::Active
+                && self.realtime_conversation.thread_id == Some(thread_id)
+                && self.realtime_conversation.attempt_id == attempt_id;
+        }
+        self.is_current_realtime_attempt(thread_id, attempt_id, input_generation)
     }
 
     pub(crate) fn take_undelivered_realtime_speech_for_replay(
@@ -1218,6 +1266,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn accept_realtime_speech(&mut self, delivery_id: u64) {
+        self.forget_realtime_status_speech(delivery_id);
         if let Some(delivery) = self
             .realtime_conversation
             .pending_speech
@@ -1232,6 +1281,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn restore_undelivered_realtime_speech(&mut self, delivery_id: u64) {
+        // Status prompts are already visible in the approval prompt or history.
+        if self.forget_realtime_status_speech(delivery_id) {
+            return;
+        }
         if self.app_event_tx.voice_only.load(Ordering::Relaxed) {
             return;
         }
@@ -1600,6 +1653,12 @@ impl ChatWidget {
                 .assistant_caption_started_after_speech_queue = false;
         }
         let voice_input_fingerprint = (role == "user").then(|| realtime_input_fingerprint(&text));
+        // The generation that owned in-flight work before this utterance began.
+        let pre_utterance_generation = match self.realtime_conversation.transcript_input_generation
+        {
+            Some(generation) => generation.wrapping_sub(/*rhs*/ 1),
+            None => self.realtime_conversation.input_generation,
+        };
         if role == "user" {
             match self
                 .realtime_conversation
@@ -1684,6 +1743,9 @@ impl ChatWidget {
                 .push_back(cell);
             self.bump_active_cell_revision();
             self.flush_realtime_transcript_history();
+        }
+        if role == "user" && has_text {
+            self.on_realtime_user_utterance(&text, pre_utterance_generation);
         }
     }
 

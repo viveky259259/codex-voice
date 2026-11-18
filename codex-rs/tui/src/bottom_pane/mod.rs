@@ -119,6 +119,7 @@ pub(crate) use approval_overlay::ApprovalRequest;
 pub(crate) use approval_overlay::ExecApprovalRequest;
 pub(crate) use approval_overlay::McpElicitationApprovalRequest;
 pub(crate) use approval_overlay::PermissionsApprovalRequest;
+pub(crate) use approval_overlay::VoiceApprovalDecision;
 pub(crate) use approval_overlay::format_requested_permissions_rule;
 pub(crate) use async_questions::AsyncQuestions;
 pub(crate) use async_questions::QuestionState;
@@ -761,6 +762,32 @@ impl BottomPane {
 
     fn active_view(&self) -> Option<&dyn BottomPaneView> {
         self.view_stack.last().map(std::convert::AsRef::as_ref)
+    }
+
+    /// The approval prompt visible at the top of the view stack, if any.
+    pub(crate) fn current_approval_request(&self) -> Option<&ApprovalRequest> {
+        self.active_view()?.current_approval_request()
+    }
+
+    pub(crate) fn offers_voice_approval(&self, decision: VoiceApprovalDecision) -> bool {
+        self.active_view()
+            .is_some_and(|view| view.offers_voice_approval(decision))
+    }
+
+    /// Answer the visible approval prompt by voice, exactly as if its option was selected.
+    pub(crate) fn apply_voice_approval(&mut self, decision: VoiceApprovalDecision) -> bool {
+        let Some(view) = self.view_stack.last_mut() else {
+            return false;
+        };
+        if !view.apply_voice_approval(decision) {
+            return false;
+        }
+        if view.is_complete() {
+            let completion = view.completion();
+            self.pop_active_view_with_completion(completion);
+        }
+        self.request_redraw();
+        true
     }
 
     pub(crate) fn current_patch_approval(&self) -> Option<&ApplyPatchApprovalRequest> {

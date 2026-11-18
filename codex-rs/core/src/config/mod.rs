@@ -4848,6 +4848,7 @@ impl Config {
                         session_type: realtime.session_type.unwrap_or(defaults.session_type),
                         transport: realtime.transport.unwrap_or(defaults.transport),
                         voice: realtime.voice,
+                        auto_start: realtime.auto_start.unwrap_or(defaults.auto_start),
                     }
                 }),
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,

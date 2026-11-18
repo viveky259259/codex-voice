@@ -171,3 +171,7 @@ mod lifecycle;
 mod speech_recovery;
 #[path = "realtime_tests/transcripts.rs"]
 mod transcripts;
+#[path = "realtime_tests/voice_approvals.rs"]
+mod voice_approvals;
+#[path = "realtime_tests/voice_auto_start.rs"]
+mod voice_auto_start;

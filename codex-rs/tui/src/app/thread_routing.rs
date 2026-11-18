@@ -959,10 +959,11 @@ impl App {
                     return Ok(true);
                 }
                 if *realtime_thread_id != thread_id
-                    || !self.chat_widget.is_current_realtime_attempt(
+                    || !self.chat_widget.may_deliver_realtime_speech(
                         *realtime_thread_id,
                         *attempt_id,
                         *input_generation,
+                        *delivery_id,
                     )
                 {
                     self.chat_widget

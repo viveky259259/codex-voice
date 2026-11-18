@@ -84,6 +84,8 @@ pub(crate) enum VoiceControl {
     Toggle,
     Stop,
     Mute,
+    /// Start voice for a newly established thread when `[realtime] auto_start` is set.
+    AutoStart,
 }
 
 /// Confirmed server lifecycle operations available from the agents dashboard.

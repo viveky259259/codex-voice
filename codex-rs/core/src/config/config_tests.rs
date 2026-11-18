@@ -14008,6 +14008,7 @@ voice = "cedar"
             session_type: Some(RealtimeWsMode::Transcription),
             transport: Some(RealtimeTransport::WebRtc),
             voice: Some(RealtimeVoice::Cedar),
+            auto_start: None,
         })
     );
 
@@ -14026,6 +14027,7 @@ voice = "cedar"
             session_type: RealtimeWsMode::Transcription,
             transport: RealtimeTransport::WebRtc,
             voice: Some(RealtimeVoice::Cedar),
+            auto_start: false,
         }
     );
     Ok(())

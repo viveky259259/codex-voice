@@ -187,6 +187,23 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
+    /// The approval prompt this view is currently asking about, if any.
+    fn current_approval_request(&self) -> Option<&ApprovalRequest> {
+        None
+    }
+
+    /// Whether the current approval prompt has an option for this voice decision.
+    fn offers_voice_approval(&self, _decision: super::VoiceApprovalDecision) -> bool {
+        false
+    }
+
+    /// Apply a voice decision to the current approval prompt.
+    ///
+    /// Returns `true` when the decision was submitted.
+    fn apply_voice_approval(&mut self, _decision: super::VoiceApprovalDecision) -> bool {
+        false
+    }
+
     /// Try to handle approval request; return the original value if not
     /// consumed.
     fn try_consume_approval_request(

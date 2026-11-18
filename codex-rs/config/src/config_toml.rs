@@ -696,6 +696,9 @@ pub struct RealtimeConfig {
     pub session_type: RealtimeWsMode,
     pub transport: RealtimeTransport,
     pub voice: Option<RealtimeVoice>,
+    /// Start the voice conversation as soon as the TUI's first thread exists.
+    #[serde(default)]
+    pub auto_start: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -706,6 +709,9 @@ pub struct RealtimeToml {
     pub session_type: Option<RealtimeWsMode>,
     pub transport: Option<RealtimeTransport>,
     pub voice: Option<RealtimeVoice>,
+    /// Start a voice conversation automatically once the TUI's first thread
+    /// exists. Defaults to `false`; voice-first setups set it to `true`.
+    pub auto_start: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1101,6 +1107,27 @@ mod tests {
                 "{mode:?}, {platform:?}, {level:?}"
             );
         }
+    }
+
+    #[test]
+    fn realtime_auto_start_parses_and_defaults_to_unset() {
+        let config: ConfigToml = toml::from_str("[realtime]\nauto_start = true\n")
+            .expect("realtime auto_start should deserialize");
+        assert_eq!(
+            config.realtime,
+            Some(RealtimeToml {
+                auto_start: Some(true),
+                ..RealtimeToml::default()
+            })
+        );
+
+        let config: ConfigToml =
+            toml::from_str("[realtime]\nversion = \"v2\"\n").expect("realtime should deserialize");
+        assert_eq!(
+            config.realtime.and_then(|realtime| realtime.auto_start),
+            None
+        );
+        assert!(!RealtimeConfig::default().auto_start);
     }
 
     #[test]

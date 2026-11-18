@@ -549,6 +549,7 @@ impl ChatWidget {
         {
             return;
         }
+        self.speak_realtime_turn_error(&message);
         let question_drafts = if self.thread_usage.replaying_turn_completion {
             None
         } else {

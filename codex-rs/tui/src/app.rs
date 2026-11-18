@@ -669,6 +669,8 @@ pub(crate) struct App {
     realtime_replay_order: VecDeque<ThreadId>,
     background_voice: Option<Box<ChatWidget>>,
     background_voice_error: Option<(ThreadId, String)>,
+    /// `[realtime] auto_start` fires once per process, for the first eligible thread.
+    voice_auto_start_attempted: bool,
     temporary_structured_requests: HashMap<
         ThreadId,
         (

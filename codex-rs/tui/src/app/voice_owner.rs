@@ -49,6 +49,10 @@ impl App {
     }
 
     pub(super) fn control_voice(&mut self, control: VoiceControl) {
+        if matches!(control, VoiceControl::AutoStart) {
+            self.auto_start_voice();
+            return;
+        }
         if let Some(thread_id) = self.voice_owner_thread_id()
             && let Some(owner) = self.voice_widget_for_thread(thread_id)
         {
@@ -56,6 +60,7 @@ impl App {
                 VoiceControl::Toggle => owner.toggle_realtime_conversation(),
                 VoiceControl::Stop => owner.stop_realtime_conversation(),
                 VoiceControl::Mute => owner.toggle_realtime_microphone(),
+                VoiceControl::AutoStart => {}
             }
         } else if matches!(control, VoiceControl::Toggle) && !self.reconnect.offline {
             // Preserve the ended owner's transcript before allowing another call.
@@ -64,6 +69,24 @@ impl App {
         } else if matches!(control, VoiceControl::Mute) {
             self.chat_widget.toggle_realtime_microphone();
         }
+        self.repaint_agents_overview();
+    }
+
+    /// Auto-start voice at most once per process, for the first eligible thread.
+    /// Later threads keep whatever voice state the user chose.
+    fn auto_start_voice(&mut self) {
+        if self.voice_auto_start_attempted
+            || self.reconnect.offline
+            || self.chat_widget.thread_id().is_none()
+        {
+            return;
+        }
+        self.voice_auto_start_attempted = true;
+        if self.voice_owner_thread_id().is_some() {
+            return;
+        }
+        self.retire_background_voice();
+        self.chat_widget.auto_start_realtime_conversation();
         self.repaint_agents_overview();
     }
 
