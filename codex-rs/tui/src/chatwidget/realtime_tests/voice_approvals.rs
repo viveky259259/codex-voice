@@ -15,14 +15,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-const ALL_DECISIONS: [CommandExecutionApprovalDecision; 4] = [
+pub(super) const ALL_DECISIONS: [CommandExecutionApprovalDecision; 4] = [
     CommandExecutionApprovalDecision::Accept,
     CommandExecutionApprovalDecision::AcceptForSession,
     CommandExecutionApprovalDecision::Decline,
     CommandExecutionApprovalDecision::Cancel,
 ];
 
-fn exec_approval(
+pub(super) fn exec_approval(
     thread_id: ThreadId,
     id: &str,
     command: &str,
@@ -42,7 +42,7 @@ fn exec_approval(
     })
 }
 
-fn spoken(ops: &mut UnboundedReceiver<AppCommand>) -> Vec<String> {
+pub(super) fn spoken(ops: &mut UnboundedReceiver<AppCommand>) -> Vec<String> {
     std::iter::from_fn(|| ops.try_recv().ok())
         .filter_map(|op| match op {
             AppCommand::RealtimeConversationSpeech { text, .. } => Some(text.as_str().to_string()),
@@ -52,7 +52,7 @@ fn spoken(ops: &mut UnboundedReceiver<AppCommand>) -> Vec<String> {
 }
 
 /// Drain app events, returning approval submissions and rendered history text.
-fn drain_events(
+pub(super) fn drain_events(
     chat: &mut ChatWidget,
     events: &mut UnboundedReceiver<AppEvent>,
 ) -> (Vec<AppCommand>, String) {
@@ -73,12 +73,12 @@ fn drain_events(
     (submitted, history.join("\n"))
 }
 
-fn say(chat: &mut ChatWidget, text: &str) {
+pub(super) fn say(chat: &mut ChatWidget, text: &str) {
     chat.on_realtime_transcript_delta("user".to_string(), text.to_string());
     chat.on_realtime_transcript_done("user".to_string(), text.to_string());
 }
 
-fn exec_decision(op: &AppCommand) -> Option<(&str, &CommandExecutionApprovalDecision)> {
+pub(super) fn exec_decision(op: &AppCommand) -> Option<(&str, &CommandExecutionApprovalDecision)> {
     match op {
         AppCommand::ExecApproval { id, decision, .. } => Some((id.as_str(), decision)),
         _ => None,
@@ -542,7 +542,7 @@ async fn a_failed_turn_is_summarized_aloud() {
 }
 
 /// The voice model handing the user's words off as a delegated turn.
-fn hand_off(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, text: &str) {
+pub(super) fn hand_off(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, text: &str) {
     start_item(
         chat,
         thread_id,

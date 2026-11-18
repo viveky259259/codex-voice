@@ -688,7 +688,7 @@ pub enum RealtimeTransport {
 pub use codex_protocol::protocol::RealtimeConversationVersion as RealtimeWsVersion;
 pub use codex_protocol::protocol::RealtimeVoice;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct RealtimeConfig {
     pub version: RealtimeWsVersion,
@@ -699,6 +699,27 @@ pub struct RealtimeConfig {
     /// Start the voice conversation as soon as the TUI's first thread exists.
     #[serde(default)]
     pub auto_start: bool,
+    /// Recognize spoken orchestration commands ("what's build doing", "tell
+    /// build to run the tests", "switch to opus") during a voice conversation.
+    #[serde(default = "default_realtime_voice_commands")]
+    pub voice_commands: bool,
+}
+
+fn default_realtime_voice_commands() -> bool {
+    true
+}
+
+impl Default for RealtimeConfig {
+    fn default() -> Self {
+        Self {
+            version: RealtimeWsVersion::default(),
+            session_type: RealtimeWsMode::default(),
+            transport: RealtimeTransport::default(),
+            voice: None,
+            auto_start: false,
+            voice_commands: default_realtime_voice_commands(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -712,6 +733,10 @@ pub struct RealtimeToml {
     /// Start a voice conversation automatically once the TUI's first thread
     /// exists. Defaults to `false`; voice-first setups set it to `true`.
     pub auto_start: Option<bool>,
+    /// Recognize spoken orchestration commands during a voice conversation:
+    /// list, check, steer, and stop agents, and switch models. Defaults to
+    /// `true`; set `false` to send every utterance to the model.
+    pub voice_commands: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1128,6 +1153,20 @@ mod tests {
             None
         );
         assert!(!RealtimeConfig::default().auto_start);
+    }
+
+    #[test]
+    fn realtime_voice_commands_parses_and_defaults_to_on() {
+        let config: ConfigToml = toml::from_str("[realtime]\nvoice_commands = false\n")
+            .expect("realtime voice_commands should deserialize");
+        assert_eq!(
+            config.realtime,
+            Some(RealtimeToml {
+                voice_commands: Some(false),
+                ..RealtimeToml::default()
+            })
+        );
+        assert!(RealtimeConfig::default().voice_commands);
     }
 
     #[test]

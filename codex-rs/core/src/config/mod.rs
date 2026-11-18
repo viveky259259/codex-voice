@@ -4849,6 +4849,9 @@ impl Config {
                         transport: realtime.transport.unwrap_or(defaults.transport),
                         voice: realtime.voice,
                         auto_start: realtime.auto_start.unwrap_or(defaults.auto_start),
+                        voice_commands: realtime
+                            .voice_commands
+                            .unwrap_or(defaults.voice_commands),
                     }
                 }),
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,

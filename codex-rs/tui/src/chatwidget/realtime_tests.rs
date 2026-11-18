@@ -175,3 +175,5 @@ mod transcripts;
 mod voice_approvals;
 #[path = "realtime_tests/voice_auto_start.rs"]
 mod voice_auto_start;
+#[path = "realtime_tests/voice_commands.rs"]
+mod voice_commands;

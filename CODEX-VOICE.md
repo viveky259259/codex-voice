@@ -11,8 +11,8 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 |---|---|---|
 | Voice-first TUI: auto-start, spoken approvals with confirmation, spoken status | `codex-rs/tui` | Tested (no-audio harness). Live audio: verify on a Mac. |
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
-| Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Not wired into the TUI yet. |
-| Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator` | Tested with a fake backend. App-server backend and TUI wiring: next, on the Mac. |
+| Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Wired into the TUI. |
+| Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator`, `codex-rs/tui/src/app/voice_command*.rs` | Wired into the TUI for this machine's agents, over its app server. Tested against a fake app server; not yet in a live voice session. |
 | `codex remote list` / `codex remote attach` (Tailscale + SSH) | `codex-rs/tailnet`, `app-server-client`, `cli` | Tested on macOS with fake ssh/tailscale against a real local server. Real tailnet: not yet. |
 
 Branches: `codex-voice` holds tested work; `wip` adds work still being tested
@@ -43,6 +43,7 @@ with GStreamer installed. Voice uses OpenAI's realtime service.
 [realtime]
 type = "conversational"
 auto_start = true   # start listening as soon as a session opens
+voice_commands = true   # the default; false sends every utterance to the model
 ```
 
 F8 or `/voice` still toggles voice by hand; F9 mutes.
@@ -60,6 +61,23 @@ Spoken approvals, while an approval prompt is open:
 Anything with a negation or hedge ("don't approve", "maybe") is never an
 answer. Only your own words count: if the voice model relays "confirm" on your
 behalf, nothing is approved.
+
+Voice commands, during a voice conversation (approvals come first while a
+prompt is open):
+
+| Say | Effect |
+|---|---|
+| "what's running", "list my agents" | Lists this machine's loaded agents. |
+| "what's build doing", "check on build" | Reads that agent's status and latest step. |
+| "tell build to run the tests" | Asks "Tell build on <host>: run the tests. Say confirm."; only "confirm" sends it. |
+| "stop build" | Asks "Stop build on <host>? Say confirm."; only "confirm" interrupts it. |
+| "switch to opus" | Applies the model like the `/model` picker. |
+| "list my machines" | Lists Tailscale peers and `~/.ssh/config` hosts. |
+| "connect to studio" | Says "Run codex remote attach studio." (no runtime attach yet). |
+
+Anything else after "Say confirm." cancels. When two agents share a name,
+Codex asks which one. "It" means the last agent you asked about. Everything
+that is not a command goes to the model as before.
 
 ## Claude models
 

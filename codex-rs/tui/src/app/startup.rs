@@ -1070,6 +1070,7 @@ See the Codex keymap documentation for supported actions and examples."
             background_voice: None,
             background_voice_error: None,
             voice_auto_start_attempted: false,
+            voice_commands: Default::default(),
             temporary_structured_requests: HashMap::new(),
             cloud_title_shutdown: Default::default(),
             pending_thread_titles: HashMap::new(),

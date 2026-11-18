@@ -60,6 +60,33 @@ fn system_clock() -> i64 {
         })
 }
 
+/// [`Orchestrator::parse`] without an engine: `parse_voice_command` against
+/// `context`, then "it" / "that agent" resolved to `last_agent`.
+///
+/// A caller that mirrors the engine's [`Orchestrator::voice_context`] and
+/// [`Orchestrator::last_agent`] (for example a UI deciding synchronously
+/// whether to keep a transcript from the model) gets the same command the
+/// engine would parse.
+pub fn parse_with_last_agent(
+    transcript: &str,
+    context: &VoiceContext,
+    last_agent: Option<&AgentRef>,
+    approval_prompt_open: bool,
+) -> VoiceCommand {
+    let command = parse_voice_command(transcript, context);
+    if !matches!(command, VoiceCommand::None | VoiceCommand::NotFound { .. }) {
+        return command;
+    }
+    let Some(last) = last_agent else {
+        return command;
+    };
+    match resolve_pronoun(transcript, last) {
+        Some(VoiceCommand::StopAgent { .. }) if approval_prompt_open => VoiceCommand::None,
+        Some(resolved) => resolved,
+        None => command,
+    }
+}
+
 /// Lists, reads, steers, and stops agents across machines.
 ///
 /// One [`AgentBackend`] per machine. The engine keeps the last snapshot (for
@@ -109,6 +136,16 @@ impl Orchestrator {
     pub fn with_known_models(mut self, models: Vec<ModelRef>) -> Self {
         self.known_models = models;
         self
+    }
+
+    /// Replace the known machines, for example after a fresh tailnet discovery.
+    pub fn set_known_machines(&mut self, machines: Vec<String>) {
+        self.known_machines = machines;
+    }
+
+    /// Replace the known models, for example after the model catalog loads.
+    pub fn set_known_models(&mut self, models: Vec<ModelRef>) {
+        self.known_models = models;
     }
 
     /// Unix-seconds clock used for "2 minutes". Defaults to the system clock.
@@ -171,18 +208,12 @@ impl Orchestrator {
     /// approval grammar. Otherwise "stop it" stops the last agent, after
     /// confirmation. A bare "stop" is never an agent command.
     pub fn parse(&self, transcript: &str, approval_prompt_open: bool) -> VoiceCommand {
-        let command = parse_voice_command(transcript, &self.voice_context());
-        if !matches!(command, VoiceCommand::None | VoiceCommand::NotFound { .. }) {
-            return command;
-        }
-        let Some(last) = &self.last_agent else {
-            return command;
-        };
-        match resolve_pronoun(transcript, last) {
-            Some(VoiceCommand::StopAgent { .. }) if approval_prompt_open => VoiceCommand::None,
-            Some(resolved) => resolved,
-            None => command,
-        }
+        parse_with_last_agent(
+            transcript,
+            &self.voice_context(),
+            self.last_agent.as_ref(),
+            approval_prompt_open,
+        )
     }
 
     /// Handle one final user transcript end to end: confirm or cancel a

@@ -100,10 +100,11 @@ separators and camelCase humps as spaces ("Mac Studio", "gpt 5.4 mini").
 
 ## TUI integration
 
-This was written, not compiled, in the cloud container, which cannot build
-`codex-tui`. Wire it up on the Mac, add `codex-voice-commands = { workspace =
-true }` to `tui/Cargo.toml`, and run `cargo test -p codex-tui --lib -- realtime
-voice` with `RUST_MIN_STACK=8388608`.
+Wired: `tui/src/chatwidget/realtime/voice_commands.rs` (routing and handoffs)
+and `tui/src/app/voice_commands.rs` (the orchestrator task), with the engine
+from `codex-orchestrator`. Tests: `cargo test -p codex-tui --lib -- voice_command`
+with `RUST_MIN_STACK=8388608`. The notes below are the plan it follows; where
+they differ, the code routes through `codex_orchestrator::Orchestrator`.
 
 ### 1. Where final transcripts arrive
 

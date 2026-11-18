@@ -104,7 +104,9 @@ fn normalized_phrase(text: &str) -> String {
         .join(" ")
 }
 
-pub(crate) fn is_cancel_phrase(text: &str) -> bool {
+/// Whether an utterance cancels a pending action or question outright
+/// ("cancel", "no", "never mind", "stop", ...).
+pub fn is_cancel_phrase(text: &str) -> bool {
     CANCEL_PHRASES.contains(&normalized_phrase(text).as_str())
 }
 

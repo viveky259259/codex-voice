@@ -19,8 +19,9 @@ Development continues in the cloud session; the Mac is the test bench
 - `codex-rs/voice-commands` (`codex-voice-commands`): pure parser for spoken
   orchestration / model / machine commands ("what's my desktop agent doing",
   "tell worker two to run the tests", "switch to claude", "connect to my mac
-  studio"). 47 tests pass. NOT yet wired into the TUI. Wiring is Mac work
-  (needs a codex-tui build); the exact plan is in its README, "TUI integration".
+  studio"). 47 tests pass. Wired into the TUI on `wip` (with
+  `codex-orchestrator`): see "Voice commands" in CODEX-VOICE.md. Run
+  `cargo test -p codex-tui --lib -- voice_command`. Not yet tried live.
 
 ## On wip only (untested)
 - `035f3f0`-equivalent fix commit "Voice approvals: apply each spoken answer

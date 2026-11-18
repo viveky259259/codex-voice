@@ -2576,6 +2576,41 @@ impl App {
                     self.control_voice(control);
                 }
             }
+            AppEvent::VoiceCommand {
+                thread_id,
+                seq,
+                transcript,
+                approval_prompt_open,
+            } => {
+                self.submit_voice_command(
+                    app_server,
+                    thread_id,
+                    seq,
+                    super::voice_commands::VoiceCommandJob::Utterance {
+                        transcript,
+                        approval_prompt_open,
+                    },
+                );
+            }
+            AppEvent::VoiceCommandCancel { thread_id, seq } => {
+                self.submit_voice_command(
+                    app_server,
+                    thread_id,
+                    seq,
+                    super::voice_commands::VoiceCommandJob::Cancel,
+                );
+            }
+            AppEvent::VoiceCommandRefresh { thread_id, seq } => {
+                self.submit_voice_command(
+                    app_server,
+                    thread_id,
+                    seq,
+                    super::voice_commands::VoiceCommandJob::Refresh,
+                );
+            }
+            AppEvent::VoiceCommandResult { thread_id, result } => {
+                self.handle_voice_command_result(thread_id, result);
+            }
             AppEvent::RealtimeSessionLockStopped { thread_id } => {
                 if let Some(owner) = self.voice_widget_for_thread(thread_id) {
                     owner.stop_if_session_locked();

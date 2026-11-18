@@ -14009,6 +14009,7 @@ voice = "cedar"
             transport: Some(RealtimeTransport::WebRtc),
             voice: Some(RealtimeVoice::Cedar),
             auto_start: None,
+            voice_commands: None,
         })
     );
 
@@ -14028,6 +14029,7 @@ voice = "cedar"
             transport: RealtimeTransport::WebRtc,
             voice: Some(RealtimeVoice::Cedar),
             auto_start: false,
+            voice_commands: true,
         }
     );
     Ok(())
