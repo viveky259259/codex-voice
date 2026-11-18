@@ -10,7 +10,10 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tracing::debug;
 
-use crate::reasoning::decode_block;
+use crate::models::ModelRules;
+use crate::models::Thinking;
+use crate::models::model_rules;
+use crate::reasoning::decode_blocks;
 use crate::tools::CUSTOM_TOOL_INPUT_PROPERTY;
 use crate::tools::ToolRegistry;
 use crate::tools::anthropic_tool_name;
@@ -35,11 +38,36 @@ const BUDGET_OUTPUT_HEADROOM: u32 = 4_096;
 pub struct TranslateOptions {
     /// `max_tokens` sent to Anthropic (raised when a thinking budget needs it).
     pub max_tokens: u32,
+    /// Prompt cache lifetime; `None` sends no `cache_control` at all.
+    pub cache_ttl: Option<CacheTtl>,
 }
 
 impl Default for TranslateOptions {
     fn default() -> Self {
-        Self { max_tokens: 64_000 }
+        Self {
+            max_tokens: 64_000,
+            cache_ttl: Some(CacheTtl::FiveMinutes),
+        }
+    }
+}
+
+/// Lifetime of the prompt cache entries the proxy asks Anthropic to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CacheTtl {
+    /// Anthropic's default: 5 minutes, refreshed by every hit.
+    #[value(name = "5m")]
+    FiveMinutes,
+    /// 1 hour: writes cost 2x instead of 1.25x; pays off for gaps over 5 min.
+    #[value(name = "1h")]
+    OneHour,
+}
+
+impl CacheTtl {
+    fn cache_control(self) -> Value {
+        match self {
+            CacheTtl::FiveMinutes => json!({"type": "ephemeral"}),
+            CacheTtl::OneHour => json!({"type": "ephemeral", "ttl": "1h"}),
+        }
     }
 }
 
@@ -78,7 +106,14 @@ pub(crate) struct AnthropicRequest {
     pub(crate) thinking: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output_config: Option<Value>,
-    pub(crate) cache_control: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) temperature: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) top_p: Option<Value>,
+    /// Top-level automatic caching: Anthropic puts the breakpoint on the last
+    /// cacheable block, so each turn writes the prefix the next one reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_control: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -173,16 +208,19 @@ pub(crate) fn translate_request(
             );
         }
     }
+    let rules = model_rules(model);
+    debug!(model, family = ?rules.family, "applying model rules");
     let mut registry = ToolRegistry::default();
-    let tools = translate_tools(&declared_tools, &mut registry);
+    let mut tools = translate_tools(&declared_tools, &mut registry, rules.web_search_tool);
 
     let mut builder = MessagesBuilder::default();
     for item in &input {
         builder.push_item(item);
     }
-    let (system, messages) = builder.finish();
+    let (mut system, mut messages) = builder.finish();
 
-    let plan = plan_thinking(model, request.get("reasoning"), options.max_tokens);
+    let plan = plan_thinking(&rules, request.get("reasoning"), options.max_tokens);
+    let thinks = rules.thinks(plan.thinking.is_some());
     let mut output_config = serde_json::Map::new();
     if let Some(effort) = plan.effort {
         output_config.insert("effort".to_string(), Value::String(effort.to_string()));
@@ -194,8 +232,35 @@ pub(crate) fn translate_request(
     let tool_choice = if tools.is_empty() {
         None
     } else {
-        Some(tool_choice(request, &registry))
+        let choice = tool_choice(request, &registry, &rules, thinks);
+        if let Some(instruction) = &choice.instruction {
+            append_user_text(&mut messages, instruction);
+        }
+        Some(choice.value)
     };
+
+    // Sampling parameters: rejected outright or for non-default values by
+    // Claude 4.7+ / 5.x, and incompatible with thinking everywhere.
+    let sampling = |key: &str| {
+        let value = request.get(key).filter(|value| value.is_number())?;
+        if rules.sampling && !thinks {
+            Some(value.clone())
+        } else {
+            debug!(
+                param = key,
+                "dropping sampling parameter this model rejects"
+            );
+            None
+        }
+    };
+    let temperature = sampling("temperature");
+    let top_p = sampling("top_p");
+
+    let cache_ttl = options.cache_ttl.map(|ttl| request_cache_ttl(request, ttl));
+    let cache_control = cache_ttl.map(|ttl| {
+        place_stable_breakpoint(&mut system, &mut tools, ttl);
+        ttl.cache_control()
+    });
 
     Ok(TranslatedRequest {
         body: AnthropicRequest {
@@ -208,39 +273,119 @@ pub(crate) fn translate_request(
             tool_choice,
             thinking: plan.thinking,
             output_config: (!output_config.is_empty()).then_some(Value::Object(output_config)),
-            // Automatic prompt caching of the longest stable prefix.
-            cache_control: json!({"type": "ephemeral"}),
+            temperature,
+            top_p,
+            cache_control,
         },
         tools: registry,
     })
 }
 
-fn tool_choice(request: &Value, registry: &ToolRegistry) -> Value {
+/// Codex asks for long-lived caching with `prompt_cache_options.ttl`
+/// (`30m`/`12h`); the longest Anthropic offers is 1 hour.
+fn request_cache_ttl(request: &Value, default: CacheTtl) -> CacheTtl {
+    let requested = request
+        .get("prompt_cache_options")
+        .and_then(|options| options.get("ttl"))
+        .and_then(Value::as_str);
+    match requested {
+        Some(ttl) if ttl != "5m" => CacheTtl::OneHour,
+        _ => default,
+    }
+}
+
+/// Puts an explicit breakpoint at the end of the stable prefix (tools, then
+/// system), so it stays cached whatever happens later in `messages`. With the
+/// automatic breakpoint at the end of the conversation this uses 2 of the 4
+/// breakpoints Anthropic allows.
+fn place_stable_breakpoint(system: &mut [Value], tools: &mut [Value], ttl: CacheTtl) {
+    let target = match system.last_mut() {
+        Some(block) => Some(block),
+        // Without a system prompt, the last client tool (server tools carry no
+        // `input_schema`) ends the stable prefix.
+        None => tools
+            .iter_mut()
+            .rev()
+            .find(|tool| tool.get("input_schema").is_some()),
+    };
+    if let Some(Value::Object(block)) = target {
+        block.insert("cache_control".to_string(), ttl.cache_control());
+    }
+}
+
+/// Appends a text block to the final user message.
+fn append_user_text(messages: &mut [Message], text: &str) {
+    if let Some(message) = messages
+        .last_mut()
+        .filter(|message| message.role == Role::User)
+        && let Some(block) = text_block(text)
+    {
+        message.content.push(block);
+    }
+}
+
+struct ToolChoice {
+    value: Value,
+    /// Text added to the last user turn when a forced choice became `auto`.
+    instruction: Option<String>,
+}
+
+/// Maps `tool_choice`. Forced choice (`required` or a named function) is
+/// rejected by Fable 5.1+/Opus 5.5/Sonnet 5.5 and by every model while it
+/// thinks, so there it becomes `auto` plus an instruction in the prompt.
+fn tool_choice(
+    request: &Value,
+    registry: &ToolRegistry,
+    rules: &ModelRules,
+    thinks: bool,
+) -> ToolChoice {
     let parallel = request
         .get("parallel_tool_calls")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let mut choice = match request.get("tool_choice") {
-        Some(Value::String(choice)) if choice == "none" => return json!({"type": "none"}),
-        Some(Value::String(choice)) if choice == "required" => json!({"type": "any"}),
-        Some(Value::Object(choice)) => match choice.get("name").and_then(Value::as_str) {
-            Some(name) => {
+    let forced = match request.get("tool_choice") {
+        Some(Value::String(choice)) if choice == "none" => {
+            return ToolChoice {
+                value: json!({"type": "none"}),
+                instruction: None,
+            };
+        }
+        Some(Value::String(choice)) if choice == "required" => Some(None),
+        Some(Value::Object(choice)) => choice
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| {
                 let namespace = choice.get("namespace").and_then(Value::as_str);
-                let anthropic_name = anthropic_tool_name(namespace, name);
-                if registry.lookup(&anthropic_name).is_some() {
-                    json!({"type": "tool", "name": anthropic_name})
-                } else {
-                    json!({"type": "auto"})
-                }
-            }
-            None => json!({"type": "auto"}),
+                anthropic_tool_name(namespace, name)
+            })
+            .filter(|name| registry.lookup(name).is_some())
+            .map(Some),
+        _ => None,
+    };
+    let mut instruction = None;
+    let mut value = match forced {
+        None => json!({"type": "auto"}),
+        Some(name) if rules.forced_tool_choice && !thinks => match name {
+            Some(name) => json!({"type": "tool", "name": name}),
+            None => json!({"type": "any"}),
         },
-        _ => json!({"type": "auto"}),
+        Some(name) => {
+            debug!(
+                family = ?rules.family,
+                tool = name.as_deref().unwrap_or("<any>"),
+                "model rejects forced tool_choice here; sending auto"
+            );
+            instruction = Some(match name {
+                Some(name) => format!("Respond by calling the `{name}` tool."),
+                None => "Respond by calling one of the available tools.".to_string(),
+            });
+            json!({"type": "auto"})
+        }
     };
     if !parallel {
-        choice["disable_parallel_tool_use"] = Value::Bool(true);
+        value["disable_parallel_tool_use"] = Value::Bool(true);
     }
-    choice
+    ToolChoice { value, instruction }
 }
 
 /// Maps `text.format` (structured output) to `output_config.format`.
@@ -253,16 +398,6 @@ fn output_format(request: &Value) -> Option<Value> {
     Some(json!({"type": "json_schema", "schema": schema}))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThinkingStyle {
-    /// `thinking: {type: "adaptive"}` + `output_config.effort` (Claude 4.6+).
-    Adaptive { supports_xhigh: bool },
-    /// `thinking: {type: "enabled", budget_tokens}` (Claude 3.7 through 4.5).
-    Budget,
-    /// Models without extended thinking.
-    Unsupported,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ThinkingPlan {
     thinking: Option<Value>,
@@ -270,103 +405,68 @@ struct ThinkingPlan {
     max_tokens: u32,
 }
 
-fn thinking_style(model: &str) -> ThinkingStyle {
-    // Accept provider-prefixed ids such as `anthropic.claude-...`.
-    let Some(start) = model.find("claude-") else {
-        return ThinkingStyle::Adaptive {
-            supports_xhigh: true,
-        };
+/// Maps `reasoning` onto `thinking` + `output_config.effort` for one model.
+///
+/// - No `reasoning` at all: the model's defaults (no `thinking`, no effort).
+/// - Effort `none`: thinking off where omitting `thinking` turns it off;
+///   elsewhere the lowest effort, since several models reject
+///   `{type: "disabled"}` and the proxy never sends it (nor `budget_tokens`)
+///   to an adaptive model.
+/// - `reasoning.summary` absent or `none` (Codex omits the field when the user
+///   chose `none`): `display: "omitted"`, otherwise `"summarized"`.
+fn plan_thinking(rules: &ModelRules, reasoning: Option<&Value>, max_tokens: u32) -> ThinkingPlan {
+    let no_thinking = ThinkingPlan {
+        thinking: None,
+        effort: None,
+        max_tokens,
     };
-    let parts: Vec<&str> = model[start + "claude-".len()..].split('-').collect();
-    // Legacy naming: claude-3-7-sonnet, claude-3-5-haiku, claude-3-opus.
-    if let Some(major) = parts.first().and_then(|part| part.parse::<u32>().ok()) {
-        let minor = parts.get(1).and_then(|part| part.parse::<u32>().ok());
-        return match (major, minor) {
-            (3, Some(7)) => ThinkingStyle::Budget,
-            _ => ThinkingStyle::Unsupported,
-        };
-    }
-    let Some(major) = parts.get(1).and_then(|part| part.parse::<u32>().ok()) else {
-        return ThinkingStyle::Adaptive {
-            supports_xhigh: true,
-        };
+    let Some(reasoning) = reasoning.filter(|reasoning| reasoning.is_object()) else {
+        return no_thinking;
     };
-    // A dated snapshot (`claude-sonnet-4-20250514`) has no minor version.
-    let minor = parts
-        .get(2)
-        .filter(|part| part.len() <= 2)
-        .and_then(|part| part.parse::<u32>().ok())
-        .unwrap_or(0);
-    match (major, minor) {
-        (0..=3, _) => ThinkingStyle::Budget,
-        (4, 0..=5) => ThinkingStyle::Budget,
-        (4, 6) => ThinkingStyle::Adaptive {
-            supports_xhigh: false,
-        },
-        _ => ThinkingStyle::Adaptive {
-            supports_xhigh: true,
-        },
-    }
-}
-
-fn plan_thinking(model: &str, reasoning: Option<&Value>, max_tokens: u32) -> ThinkingPlan {
-    let reasoning = reasoning.filter(|reasoning| !reasoning.is_null());
-    let effort = reasoning
-        .and_then(|reasoning| reasoning.get("effort"))
-        .and_then(Value::as_str);
-    let summary = reasoning
-        .and_then(|reasoning| reasoning.get("summary"))
-        .and_then(Value::as_str);
-    match thinking_style(model) {
-        ThinkingStyle::Adaptive { supports_xhigh } => {
-            // Claude 5.x cannot disable thinking; show the summarized text
-            // unless Codex asked for no reasoning summary.
-            let display = if summary == Some("none") {
-                "omitted"
-            } else {
-                "summarized"
-            };
-            let effort = effort.and_then(|effort| match effort {
+    let effort = reasoning.get("effort").and_then(Value::as_str);
+    let summarized = reasoning
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_some_and(|summary| summary != "none");
+    match rules.thinking {
+        Thinking::AdaptiveOnByDefault | Thinking::AdaptiveOffByDefault => {
+            let mapped = effort.and_then(|effort| match effort {
                 "none" | "minimal" | "low" => Some("low"),
                 "medium" => Some("medium"),
                 "high" => Some("high"),
-                "xhigh" if supports_xhigh => Some("xhigh"),
+                "xhigh" if rules.supports_xhigh => Some("xhigh"),
                 "xhigh" | "max" => Some("max"),
                 _ => None,
             });
+            let thinking =
+                if effort == Some("none") && rules.thinking == Thinking::AdaptiveOffByDefault {
+                    None
+                } else {
+                    let display = if summarized { "summarized" } else { "omitted" };
+                    Some(json!({"type": "adaptive", "display": display}))
+                };
             ThinkingPlan {
-                thinking: Some(json!({"type": "adaptive", "display": display})),
-                effort,
+                thinking,
+                effort: mapped,
                 max_tokens,
             }
         }
-        ThinkingStyle::Budget => {
-            let budget = match (reasoning, effort) {
-                (None, _) | (Some(_), Some("none")) => None,
-                (Some(_), Some("minimal")) => Some(BUDGET_MINIMAL),
-                (Some(_), Some("low")) => Some(BUDGET_LOW),
-                (Some(_), Some("high")) => Some(BUDGET_HIGH),
-                (Some(_), Some("xhigh" | "max")) => Some(BUDGET_XHIGH),
-                (Some(_), _) => Some(BUDGET_MEDIUM),
+        Thinking::Budget => {
+            let budget = match effort {
+                Some("none") => return no_thinking,
+                Some("minimal") => BUDGET_MINIMAL,
+                Some("low") => BUDGET_LOW,
+                Some("high") => BUDGET_HIGH,
+                Some("xhigh" | "max") => BUDGET_XHIGH,
+                _ => BUDGET_MEDIUM,
             };
-            match budget {
-                Some(budget) => ThinkingPlan {
-                    thinking: Some(json!({"type": "enabled", "budget_tokens": budget})),
-                    effort: None,
-                    max_tokens: max_tokens.max(budget + BUDGET_OUTPUT_HEADROOM),
-                },
-                None => ThinkingPlan {
-                    thinking: None,
-                    effort: None,
-                    max_tokens,
-                },
+            ThinkingPlan {
+                thinking: Some(json!({"type": "enabled", "budget_tokens": budget})),
+                effort: None,
+                max_tokens: max_tokens.max(budget + BUDGET_OUTPUT_HEADROOM),
             }
         }
-        ThinkingStyle::Unsupported => ThinkingPlan {
-            thinking: None,
-            effort: None,
-            max_tokens,
-        },
+        Thinking::Unsupported => no_thinking,
     }
 }
 
@@ -420,15 +520,16 @@ impl MessagesBuilder {
         match item_type {
             "message" => self.push_message(item),
             "reasoning" => {
-                match item
+                let blocks = item
                     .get("encrypted_content")
                     .and_then(Value::as_str)
-                    .and_then(decode_block)
-                {
-                    Some(block) => self.push(Role::Assistant, Block::Json(block)),
-                    None => {
-                        debug!("dropping reasoning item without a signed Claude thinking block")
-                    }
+                    .map(decode_blocks)
+                    .unwrap_or_default();
+                if blocks.is_empty() {
+                    debug!("dropping reasoning item without Claude thinking or server tool blocks");
+                }
+                for block in blocks {
+                    self.push(Role::Assistant, Block::Json(block));
                 }
             }
             "function_call" => {
@@ -499,6 +600,9 @@ impl MessagesBuilder {
                     self.push_text(Role::User, &format!("[message from {author}]\n{text}"));
                 }
             }
+            // Display-only: the search itself is replayed from the reasoning
+            // item that carries its server tool blocks.
+            "web_search_call" => debug!("dropping web_search_call (replayed from reasoning)"),
             other => debug!(
                 item_type = other,
                 "dropping input item with no Anthropic equivalent"
@@ -544,7 +648,7 @@ impl MessagesBuilder {
     }
 
     fn finish(self) -> (Vec<Value>, Vec<Message>) {
-        let mut messages = pair_tool_results(self.messages);
+        let mut messages = pair_tool_results(drop_unanswered_server_tool_uses(self.messages));
         if messages
             .first()
             .is_none_or(|message| message.role != Role::User)
@@ -569,6 +673,49 @@ impl MessagesBuilder {
         }
         (self.system, messages)
     }
+}
+
+/// A `server_tool_use` must be followed by its result in the same assistant
+/// message; drop any whose result was lost (for example a truncated stream).
+fn drop_unanswered_server_tool_uses(mut messages: Vec<Message>) -> Vec<Message> {
+    for message in &mut messages {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        let answered: HashSet<String> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                Block::Json(value)
+                    if value
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind.ends_with("_tool_result")) =>
+                {
+                    value
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        message.content.retain(|block| match block {
+            Block::Json(value)
+                if value.get("type").and_then(Value::as_str) == Some("server_tool_use") =>
+            {
+                let id = value.get("id").and_then(Value::as_str).unwrap_or_default();
+                let keep = answered.contains(id);
+                if !keep {
+                    debug!(id, "dropping server_tool_use without a result");
+                }
+                keep
+            }
+            _ => true,
+        });
+    }
+    messages.retain(|message| !message.content.is_empty());
+    messages
 }
 
 /// Anthropic requires every `tool_use` to be answered by a `tool_result` at

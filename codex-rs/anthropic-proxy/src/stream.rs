@@ -1,6 +1,7 @@
 //! Translates an Anthropic Messages event stream into Responses API events.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use bytes::Bytes;
 use serde_json::Map;
@@ -9,7 +10,9 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::reasoning::encode_redacted_thinking;
+use crate::reasoning::encode_server_blocks;
 use crate::reasoning::encode_thinking;
+use crate::reasoning::is_server_block_type;
 use crate::tools::CUSTOM_TOOL_INPUT_PROPERTY;
 use crate::tools::ToolKind;
 use crate::tools::ToolRegistry;
@@ -119,6 +122,23 @@ struct OpenBlock {
     state: BlockState,
 }
 
+/// A server tool block (`server_tool_use` or a `*_tool_result`) being
+/// streamed. Server tools run inside Anthropic's API, so these blocks are
+/// replayed verbatim, never executed by Codex.
+#[derive(Debug)]
+struct ServerBlock {
+    block: Value,
+    input_json: String,
+}
+
+/// A web search shown to Codex as a `web_search_call` item.
+#[derive(Debug)]
+struct WebSearch {
+    item_id: String,
+    output_index: usize,
+    query: String,
+}
+
 /// Stateful translator for one Anthropic response stream.
 #[derive(Debug)]
 pub(crate) struct StreamTranslator {
@@ -129,9 +149,17 @@ pub(crate) struct StreamTranslator {
     finished: bool,
     next_output_index: usize,
     blocks: BTreeMap<u64, OpenBlock>,
+    server_blocks: BTreeMap<u64, ServerBlock>,
+    /// Finished server tool blocks not yet stored in a reasoning item, with
+    /// the index of the first one.
+    server_run: Vec<Value>,
+    server_run_start: u64,
+    /// Open `web_search_call` items by `server_tool_use` id.
+    searches: HashMap<String, WebSearch>,
     output: Vec<Value>,
     usage: Usage,
     stop_reason: Option<String>,
+    stop_details: Option<Value>,
 }
 
 impl StreamTranslator {
@@ -144,9 +172,14 @@ impl StreamTranslator {
             finished: false,
             next_output_index: 0,
             blocks: BTreeMap::new(),
+            server_blocks: BTreeMap::new(),
+            server_run: Vec::new(),
+            server_run_start: 0,
+            searches: HashMap::new(),
             output: Vec::new(),
             usage: Usage::default(),
             stop_reason: None,
+            stop_details: None,
         }
     }
 
@@ -205,12 +238,19 @@ impl StreamTranslator {
                 self.stop_block(index)
             }
             "message_delta" => {
-                if let Some(stop_reason) = event
-                    .get("delta")
+                let delta = event.get("delta");
+                if let Some(stop_reason) = delta
                     .and_then(|delta| delta.get("stop_reason"))
                     .and_then(Value::as_str)
                 {
                     self.stop_reason = Some(stop_reason.to_string());
+                }
+                if let Some(stop_details) = delta
+                    .and_then(|delta| delta.get("stop_details"))
+                    .or_else(|| event.get("stop_details"))
+                    .filter(|details| details.is_object())
+                {
+                    self.stop_details = Some(stop_details.clone());
                 }
                 if let Some(usage) = event.get("usage") {
                     self.usage.update(usage);
@@ -296,6 +336,18 @@ impl StreamTranslator {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if is_server_block_type(block_type) {
+            self.server_blocks.insert(
+                index,
+                ServerBlock {
+                    block: block.clone(),
+                    input_json: String::new(),
+                },
+            );
+            return Vec::new();
+        }
+        // Anything else ends a run of server tool blocks.
+        let mut events = self.flush_server_run();
         let (prefix, state) = match block_type {
             "text" => (
                 "msg",
@@ -355,9 +407,8 @@ impl StreamTranslator {
                 )
             }
             other => {
-                // Server tools and their results have no Codex counterpart.
                 debug!(block_type = other, "ignoring Anthropic content block");
-                return Vec::new();
+                return events;
             }
         };
         let output_index = self.next_output_index;
@@ -380,11 +431,11 @@ impl StreamTranslator {
                 call_id, target, ..
             } => call_item(&item_id, call_id, target, "", "in_progress"),
         };
-        let mut events = vec![json!({
+        events.push(json!({
             "type": "response.output_item.added",
             "output_index": output_index,
             "item": item,
-        })];
+        }));
         self.blocks.insert(
             index,
             OpenBlock {
@@ -417,6 +468,18 @@ impl StreamTranslator {
     }
 
     fn apply_delta(&mut self, index: u64, delta: &Value) -> Vec<Value> {
+        if let Some(server) = self.server_blocks.get_mut(&index) {
+            match delta.get("type").and_then(Value::as_str) {
+                Some("input_json_delta") => server.input_json.push_str(
+                    delta
+                        .get("partial_json")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ),
+                other => debug!(delta_type = ?other, "ignoring server tool block delta"),
+            }
+            return Vec::new();
+        }
         let Some(block) = self.blocks.get_mut(&index) else {
             return Vec::new();
         };
@@ -520,6 +583,9 @@ impl StreamTranslator {
     }
 
     fn stop_block(&mut self, index: u64) -> Vec<Value> {
+        if let Some(server) = self.server_blocks.remove(&index) {
+            return self.stop_server_block(index, server);
+        }
         let Some(block) = self.blocks.remove(&index) else {
             return Vec::new();
         };
@@ -621,12 +687,130 @@ impl StreamTranslator {
         events
     }
 
+    /// Finishes a server tool block: records it for replay and updates the
+    /// `web_search_call` item Codex shows.
+    fn stop_server_block(&mut self, index: u64, server: ServerBlock) -> Vec<Value> {
+        let ServerBlock {
+            mut block,
+            input_json,
+        } = server;
+        let block_type = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut events = Vec::new();
+        if block_type == "server_tool_use" {
+            if !input_json.trim().is_empty() {
+                block["input"] = serde_json::from_str::<Value>(&input_json)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+            }
+            let id = block
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if block.get("name").and_then(Value::as_str) == Some("web_search") {
+                let query = block
+                    .get("input")
+                    .and_then(|input| input.get("query"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let search = WebSearch {
+                    item_id: format!("ws_{}_{index}", self.id_stem),
+                    output_index: self.next_output_index,
+                    query,
+                };
+                self.next_output_index += 1;
+                events.push(json!({
+                    "type": "response.output_item.added",
+                    "output_index": search.output_index,
+                    "item": web_search_item(&search, "in_progress"),
+                }));
+                self.searches.insert(id, search);
+            }
+        } else if let Some(search) = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .and_then(|id| self.searches.remove(id))
+        {
+            // Errors arrive as HTTP 200 with an error object instead of a list.
+            let status = if block.get("content").is_some_and(Value::is_array) {
+                "completed"
+            } else {
+                "failed"
+            };
+            events.extend(self.finish_search(&search, status));
+        }
+        if self.server_run.is_empty() {
+            self.server_run_start = index;
+        }
+        self.server_run.push(block);
+        events
+    }
+
+    fn finish_search(&mut self, search: &WebSearch, status: &str) -> Vec<Value> {
+        let item = web_search_item(search, status);
+        self.output.push(item.clone());
+        vec![json!({
+            "type": "response.output_item.done",
+            "output_index": search.output_index,
+            "item": item,
+        })]
+    }
+
+    /// Stores the pending server tool blocks in a reasoning item, the one
+    /// item kind whose `encrypted_content` Codex sends back to custom
+    /// providers, so the next request replays them in place.
+    fn flush_server_run(&mut self) -> Vec<Value> {
+        if self.server_run.is_empty() {
+            return Vec::new();
+        }
+        let blocks = std::mem::take(&mut self.server_run);
+        let output_index = self.next_output_index;
+        self.next_output_index += 1;
+        let item_id = format!("rs_{}_{}", self.id_stem, self.server_run_start);
+        let item = json!({
+            "type": "reasoning",
+            "id": item_id,
+            "summary": [],
+            "encrypted_content": encode_server_blocks(&blocks),
+        });
+        self.output.push(item.clone());
+        vec![
+            json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {"type": "reasoning", "id": item_id, "summary": []},
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item,
+            }),
+        ]
+    }
+
     fn complete(&mut self) -> Vec<Value> {
         let mut events = self.ensure_created();
-        let open: Vec<u64> = self.blocks.keys().copied().collect();
+        let mut open: Vec<u64> = self
+            .blocks
+            .keys()
+            .chain(self.server_blocks.keys())
+            .copied()
+            .collect();
+        open.sort_unstable();
         for index in open {
             events.extend(self.stop_block(index));
         }
+        let unfinished: Vec<WebSearch> = self.searches.drain().map(|(_, search)| search).collect();
+        for search in unfinished {
+            events.extend(self.finish_search(&search, "failed"));
+        }
+        events.extend(self.flush_server_run());
         let terminal = match self.stop_reason.as_deref() {
             Some("max_tokens") => {
                 let mut response = self.response_object("incomplete");
@@ -634,9 +818,13 @@ impl StreamTranslator {
                 json!({"type": "response.incomplete", "response": response})
             }
             Some("refusal") => {
-                let mut response = self.response_object("incomplete");
-                response["incomplete_details"] = json!({"reason": "content_filter"});
-                json!({"type": "response.incomplete", "response": response})
+                // A non-retryable failure that says why, not an empty success.
+                let mut response = self.response_object("failed");
+                response["error"] = json!({
+                    "code": "invalid_prompt",
+                    "message": refusal_message(self.stop_details.as_ref()),
+                });
+                json!({"type": "response.failed", "response": response})
             }
             Some("model_context_window_exceeded") => {
                 let mut response = self.response_object("failed");
@@ -659,6 +847,34 @@ impl StreamTranslator {
         events.push(terminal);
         events
     }
+}
+
+fn web_search_item(search: &WebSearch, status: &str) -> Value {
+    json!({
+        "type": "web_search_call",
+        "id": search.item_id,
+        "status": status,
+        "action": {"type": "search", "query": search.query},
+    })
+}
+
+/// Describes `stop_reason: "refusal"` from its `stop_details`
+/// (`{type: "refusal", category, explanation}`).
+fn refusal_message(stop_details: Option<&Value>) -> String {
+    let field = |key: &str| {
+        stop_details
+            .and_then(|details| details.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let category = field("category").unwrap_or("unspecified");
+    let mut message =
+        format!("Claude declined to continue this request (refusal category: {category}).");
+    if let Some(explanation) = field("explanation") {
+        message.push(' ');
+        message.push_str(explanation);
+    }
+    message
 }
 
 fn call_item(
