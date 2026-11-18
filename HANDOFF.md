@@ -15,6 +15,41 @@ test steps. Report results as a comment on the issue: on success, set
 `status: verified on Mac` and close it. The outbox below still works if you
 can't comment on issues.
 
+### 2026-11-18 #3 (issues #13, #17, #18): local voice in the TUI landed
+
+Commit `7fa01ab` on wip (and on codex-voice). `/voice`, F8 and auto-start now
+use local capture, STT and TTS when `[realtime] backend = "local"`. OpenAI
+realtime is not used.
+
+1. Follow "## Local voice on the Mac" below, steps 1, 2, 4, 5 and 6. Skip
+   step 3 if #12 already covers it. For the text model in step 4, use
+   whichever route works on this Mac (Ollama, Claude via the proxy, or an
+   API key) and say which one you used.
+2. **No mic on this Mac:** feed a recording in as the mic. Build a wav with
+   `say -o` plus pauses, as you did for #12, and set:
+   ```toml
+   [realtime.local.capture]
+   command = ["ffmpeg", "-nostdin", "-re", "-i", "/ABS/PATH/phrase.wav",
+              "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
+   ```
+   Make three recordings, one per run:
+   - (a) "list the files in this folder"
+   - (b) "run the tests" → when the approval prompt appears, "approve" →
+     "confirm" (leave ~4 s gaps so the prompt is spoken first)
+   - (c) "what's running"
+
+   With a real mic (USB or AirPods), speak them instead.
+3. Check on each run:
+   - the transcript becomes a user turn
+   - the answer is spoken, short, with "Details are on screen." when trimmed
+   - the approval prompt is spoken, and approve → confirm applies it
+   - "no" denies
+   - "what's running" is answered without going to the model
+   - F9 mutes and cuts speech
+   - F8 stops, and no `ffmpeg` or `say` processes are left (`pgrep -l ffmpeg`)
+4. Report per issue: #13 (local voice in the TUI), #17 (voice approvals),
+   #18 (voice commands). Comment the results, and close the ones that pass.
+
 ### 2026-11-18 #2: three tickets are ready for Mac test
 
 - #12, the local voice engine: request #1 below has the steps.
