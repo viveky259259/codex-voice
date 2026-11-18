@@ -2057,6 +2057,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-anthropic-proxy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "codex-process-hardening",
+ "codex-utils-rustls-provider",
+ "ctor 0.6.3",
+ "eventsource-stream",
+ "futures",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "codex-api"
 version = "0.0.0"
 dependencies = [
