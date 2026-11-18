@@ -92,7 +92,7 @@ drop = ["[BLANK_AUDIO]"]
     };
     assert_eq!(tts.url, DEFAULT_MCP_URL);
     assert_eq!(config.transcripts.drop, vec!["[BLANK_AUDIO]".to_string()]);
-    assert_eq!(config.transcripts.short_utterance_ms, 600);
+    assert_eq!(config.transcripts.short_utterance_ms, 1500);
 }
 
 #[test]
