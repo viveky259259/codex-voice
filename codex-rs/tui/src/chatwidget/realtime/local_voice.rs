@@ -141,6 +141,8 @@ pub(crate) struct LocalVoiceSession {
     activity: LocalActivity,
     speaking: bool,
     microphone_failed: bool,
+    /// The capture command exited cleanly (e.g. a file fed in as the mic ended).
+    microphone_ended: bool,
     /// What is queued or playing, oldest first.
     speech: VecDeque<LocalSpeechKind>,
     /// Transcripts submitted as user turns whose user item has not arrived.
@@ -159,6 +161,7 @@ impl LocalVoiceSession {
             activity: LocalActivity::default(),
             speaking: false,
             microphone_failed: false,
+            microphone_ended: false,
             speech: VecDeque::new(),
             pending_voice_inputs: VecDeque::new(),
             voice_turns: HashSet::new(),
@@ -171,6 +174,8 @@ impl LocalVoiceSession {
             "speaking"
         } else if self.microphone_failed {
             "mic unavailable"
+        } else if self.microphone_ended {
+            "mic off"
         } else {
             match self.activity {
                 LocalActivity::Listening => "listening",
@@ -326,6 +331,7 @@ impl ChatWidget {
             LocalVoiceEvent::Listening => {
                 local.activity = LocalActivity::Listening;
                 local.microphone_failed = false;
+                local.microphone_ended = false;
             }
             LocalVoiceEvent::SpeechStarted => local.activity = LocalActivity::Hearing,
             LocalVoiceEvent::SpeechEnded => local.activity = LocalActivity::Transcribing,
@@ -337,6 +343,15 @@ impl ChatWidget {
             LocalVoiceEvent::Transcript { text } => {
                 local.activity = LocalActivity::Listening;
                 self.on_local_voice_transcript(&text);
+            }
+            LocalVoiceEvent::CaptureEnded { message } => {
+                local.microphone_ended = true;
+                tracing::info!("local voice: {message}");
+                self.add_info_message(
+                    "Voice input ended: the capture command exited. Press F8 twice to restart voice."
+                        .to_string(),
+                    /*hint*/ None,
+                );
             }
             LocalVoiceEvent::Error { stage, message } => {
                 if stage == VoiceStage::Tts {

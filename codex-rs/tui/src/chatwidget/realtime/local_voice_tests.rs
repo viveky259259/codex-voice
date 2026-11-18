@@ -751,3 +751,17 @@ fn error_notices_name_the_fix() {
     assert_eq!(key, "stage:text-to-speech");
     assert!(text.contains("[realtime.local.tts]"), "{text}");
 }
+
+#[tokio::test]
+async fn clean_capture_end_is_a_notice_not_an_error() {
+    let mut h = Harness::start().await;
+    h.event(LocalVoiceEvent::CaptureEnded {
+        message: "capture ended: `ffmpeg` exited cleanly".to_string(),
+    });
+
+    let history = h.drain().history_text();
+    assert!(history.contains("Voice input ended"), "{history}");
+    assert!(!history.contains("microphone access"), "{history}");
+    assert_eq!(h.engine.take_spoken(), Vec::<String>::new());
+    assert_eq!(h.chat.local_voice_activity_for_test(), Some("mic off"));
+}

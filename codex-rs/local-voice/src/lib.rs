@@ -29,6 +29,7 @@ mod wav;
 mod test_support;
 
 pub use capture::Capture;
+pub use capture::CaptureExit;
 pub use config::CaptureConfig;
 pub use config::CommandSttConfig;
 pub use config::CommandToFileTtsConfig;
