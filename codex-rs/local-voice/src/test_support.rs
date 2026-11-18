@@ -111,13 +111,16 @@ pub(crate) async fn wait_for_file(path: &Path) -> String {
 }
 
 /// True once the process is gone (or only a zombie awaiting its reaper).
+///
+/// Uses `ps` rather than `/proc`, which does not exist on macOS.
 pub(crate) fn pid_gone(pid: u32) -> bool {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Err(_) => true,
-        Ok(stat) => stat
-            .rsplit_once(") ")
-            .is_some_and(|(_, rest)| rest.starts_with('Z')),
-    }
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    let stat = String::from_utf8_lossy(&output.stdout);
+    let stat = stat.trim();
+    stat.is_empty() || stat.starts_with('Z')
 }
 
 pub(crate) async fn wait_pid_gone(pid: u32) {
