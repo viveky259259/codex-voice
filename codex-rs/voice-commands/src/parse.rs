@@ -236,6 +236,7 @@ fn agent_candidates(indices: &[usize], context: &VoiceContext) -> Vec<Candidate>
             Candidate {
                 id: agent.id.clone(),
                 label: agent.spoken_label(),
+                machine: agent.machine.clone(),
             }
         })
         .collect()
@@ -375,6 +376,7 @@ fn parse_switch_model(words: &[String], context: &VoiceContext) -> Option<VoiceC
                 .map(|index| Candidate {
                     id: models[*index].slug.clone(),
                     label: speakable(&models[*index].slug),
+                    machine: None,
                 })
                 .collect(),
         }),
@@ -417,6 +419,7 @@ fn parse_attach(words: &[String], context: &VoiceContext) -> Option<VoiceCommand
                 .map(|index| Candidate {
                     id: machines[*index].clone(),
                     label: speakable(&machines[*index]),
+                    machine: None,
                 })
                 .collect(),
         }),
@@ -514,7 +517,7 @@ pub fn resolve_choice(
         context
             .known_agents
             .iter()
-            .find(|agent| agent.id == chosen.id)
+            .find(|agent| agent.id == chosen.id && agent.machine == chosen.machine)
             .cloned()
     };
     Some(match action {

@@ -127,6 +127,7 @@ fn ambiguity_and_unknown_targets() {
             .map(|index| Candidate {
                 id: index.to_string(),
                 label: format!("worker {index}"),
+                machine: None,
             })
             .collect(),
     };

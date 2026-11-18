@@ -55,6 +55,14 @@ fn candidate(id: &str, label: &str) -> Candidate {
     Candidate {
         id: id.to_string(),
         label: label.to_string(),
+        machine: None,
+    }
+}
+
+fn agent_candidate(id: &str, label: &str, machine: &str) -> Candidate {
+    Candidate {
+        machine: Some(machine.to_string()),
+        ..candidate(id, label)
     }
 }
 
@@ -196,8 +204,8 @@ fn attach_machine_with_spoken_forms() {
 fn ambiguous_targets_are_not_guessed() {
     let context = twin_builds();
     let builds = vec![
-        candidate("t-build-desktop", "build on desktop"),
-        candidate("t-build-laptop", "build on laptop"),
+        agent_candidate("t-build-desktop", "build on desktop", "desktop"),
+        agent_candidate("t-build-laptop", "build on laptop", "laptop"),
     ];
     assert_eq!(
         parse_voice_command("stop build", &context),
@@ -477,5 +485,32 @@ fn model_and_machine_choices() {
             &context,
         ),
         Some(attach("laptop"))
+    );
+}
+
+#[test]
+fn choices_between_machines_with_the_same_thread_id_pick_the_right_machine() {
+    // Thread ids are only unique per machine.
+    let context = VoiceContext {
+        known_agents: vec![
+            agent("t-1", "build", Some("desktop")),
+            agent("t-1", "build", Some("laptop")),
+        ],
+        known_machines: vec!["desktop".to_string(), "laptop".to_string()],
+        known_models: Vec::new(),
+    };
+    let VoiceCommand::Ambiguous {
+        action, candidates, ..
+    } = parse_voice_command("stop build", &context)
+    else {
+        panic!("expected an ambiguous stop");
+    };
+    assert_eq!(
+        resolve_choice(&action, &candidates, "laptop", &context),
+        Some(stop(agent("t-1", "build", Some("laptop"))))
+    );
+    assert_eq!(
+        resolve_choice(&action, &candidates, "first", &context),
+        Some(stop(agent("t-1", "build", Some("desktop"))))
     );
 }
