@@ -152,6 +152,275 @@ Development continues in the cloud session; the Mac is the test bench
 - `wip` — `codex-voice` + Lane C (not yet compiled in full) + this file.
   Test from `wip`.
 
+## Local voice on the Mac
+
+`[realtime] backend = "local"` makes F8, `/voice` and `auto_start` use the
+local voice engine (`codex-rs/local-voice`) instead of OpenAI realtime, so the
+`chatgpt.com/backend-api/codex/realtime/calls` 404 no longer matters. The mic
+is transcribed locally (ffmpeg + mlx_whisper), each transcript goes through
+voice approvals, then voice commands, and otherwise is submitted exactly like
+a typed message (it steers a running turn, as Enter does). Prompts, outcomes
+and a short summary of each voice turn's answer are spoken with `say`. Typed
+turns are not spoken. Code: `tui/src/chatwidget/realtime/local_voice.rs`.
+Tested in the cloud with a fake engine only (no audio).
+
+Run every command from the repo root unless a step says otherwise.
+
+### 1. Update and build
+
+```bash
+git fetch origin && git checkout wip && git pull --ff-only
+cd codex-rs && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build -p codex-cli -p codex-local-voice -p codex-anthropic-proxy && cd ..
+```
+
+The binaries are `codex-rs/target/debug/codex`, `codex-local-voice` and
+`codex-anthropic-proxy`.
+
+### 2. Prerequisites
+
+```bash
+brew install ffmpeg
+uv tool install mlx-whisper          # provides mlx_whisper (pip install mlx-whisper also works)
+which ffmpeg mlx_whisper say afplay  # all four must print a path
+ffmpeg -hide_banner -f avfoundation -list_devices true -i ""   # note the index of your microphone under "audio devices"
+```
+
+These match the engine's macOS defaults (`mlx_whisper ... --model
+mlx-community/whisper-base-mlx`, `say`, `afplay`). The first transcription
+downloads the whisper model, so it is slow once.
+
+Microphone access: System Settings → Privacy & Security → Microphone → turn on
+the terminal app you run Codex in (Terminal, iTerm, Ghostty...). Quit and
+reopen that terminal after changing it. If access is denied, macOS often
+gives ffmpeg silence instead of an error: the footer then stays on
+"listening" and never shows "hearing you".
+
+### 3. Check the engine on its own
+
+```bash
+cat > /tmp/voice-say.toml <<'EOF'
+[capture]
+device = "0"
+
+[stt]
+backend = "command"
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+           "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
+timeout_ms = 60000
+
+[tts]
+backend = "command"
+command = ["say", "{text}"]
+EOF
+codex-rs/target/debug/codex-local-voice config | head -20
+codex-rs/target/debug/codex-local-voice say --config /tmp/voice-say.toml "Hello from Codex"
+codex-rs/target/debug/codex-local-voice listen --config /tmp/voice-say.toml
+```
+
+Change `device = "0"` if your microphone has another index. `say` must be
+heard and end with `SpeakingFinished`. In `listen`, say "what time is it": you
+should see `SpeechStarted`, `SpeechEnded`, then a line like `Transcript {
+text: "What time is it?" }`. Type `hello` and Enter: it is spoken and NOT transcribed back.
+Ctrl-C quits. Fix this step before going on; the TUI uses the same engine.
+
+### 4. A text model that works without the ChatGPT model gate
+
+The fork reports version 0.0.0, which is the likely reason the ChatGPT account
+rejects the configured model. Pick ONE option. Each command writes the top of
+`~/.codex/config.toml` (your old file is kept as `config.toml.bak`); step 5
+appends the voice part.
+
+**(a) Fully local with Ollama.** Needs Ollama 0.13.4 or newer (Codex talks to
+its Responses API and refuses older versions with `--oss`), and about 16 GB of
+free memory for the default `gpt-oss:20b`.
+
+```bash
+brew install ollama
+brew services start ollama
+ollama --version
+ollama pull gpt-oss:20b
+mkdir -p ~/.codex && cp ~/.codex/config.toml ~/.codex/config.toml.bak 2>/dev/null
+cat > ~/.codex/config.toml <<EOF
+log_dir = "$HOME/.codex/log"
+approval_policy = "untrusted"
+model_provider = "ollama"
+model = "gpt-oss:20b"
+EOF
+```
+
+Without the config you can also run `codex-rs/target/debug/codex --oss
+--local-provider ollama -m gpt-oss:20b` (it checks the Ollama version and pulls
+the model if missing).
+
+**(b) Claude through codex-anthropic-proxy.** In a second terminal, from the
+repo root:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+codex-rs/target/debug/codex-anthropic-proxy --port 18765
+```
+
+Then, in the first terminal, from the repo root:
+
+```bash
+mkdir -p ~/.codex && cp ~/.codex/config.toml ~/.codex/config.toml.bak 2>/dev/null
+cat > ~/.codex/config.toml <<EOF
+log_dir = "$HOME/.codex/log"
+approval_policy = "untrusted"
+model = "claude-opus-5-5"
+model_provider = "anthropic-proxy"
+model_catalog_json = "$PWD/codex-rs/anthropic-proxy/model_catalog.example.json"
+
+[model_providers.anthropic-proxy]
+name = "Anthropic (via codex-anthropic-proxy)"
+base_url = "http://127.0.0.1:18765/v1"
+wire_api = "responses"
+requires_openai_auth = false
+stream_idle_timeout_ms = 600000
+EOF
+```
+
+**(c) An OpenAI API key.** Replace `gpt-5.1` with a model your key can use.
+
+```bash
+export OPENAI_API_KEY=sk-...
+mkdir -p ~/.codex && cp ~/.codex/config.toml ~/.codex/config.toml.bak 2>/dev/null
+cat > ~/.codex/config.toml <<EOF
+log_dir = "$HOME/.codex/log"
+approval_policy = "untrusted"
+model = "gpt-5.1"
+model_provider = "openai-apikey"
+
+[model_providers.openai-apikey]
+name = "OpenAI (API key)"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+EOF
+```
+
+`approval_policy = "untrusted"` makes Codex ask before running commands, so
+step 6 gets an approval prompt to answer by voice. `log_dir` turns on the log
+file used in step 7.
+
+### 5. Turn on local voice
+
+```bash
+cat >> ~/.codex/config.toml <<'EOF'
+
+[realtime]
+backend = "local"
+auto_start = true
+voice_commands = true
+
+[realtime.local.capture]
+device = "0"
+
+[realtime.local.stt]
+backend = "command"
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+           "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
+timeout_ms = 60000
+
+[realtime.local.tts]
+backend = "command"
+command = ["say", "{text}"]
+EOF
+cat ~/.codex/config.toml
+```
+
+Use the same `device` as in step 3. `[realtime] type = "conversational"` is
+not needed for the local backend. `[realtime.local]` takes the same tables as
+the `--config` files of `codex-local-voice` (`capture`, `vad`, `stt`, `tts`,
+`playback`, `transcripts`); leave it out entirely to use the macOS defaults.
+
+Alternative, the local-agents MCP server for both directions: start it
+(`uv run mcp_server.py --transport streamable-http`), check its tools with
+`codex-rs/target/debug/codex-local-voice tools http://127.0.0.1:5051/mcp`
+(expect `submit_inference` and `get_job`), and replace the
+`[realtime.local.stt]` and `[realtime.local.tts]` blocks above with these
+(the names and model ids from the Mac test in #12, as in
+`codex-rs/local-voice/README.md`):
+
+```toml
+[realtime.local.stt]
+backend = "mcp"
+url = "http://127.0.0.1:5051/mcp"
+tool = "submit_inference"
+arguments = { model_id = "hf:mlx-community/whisper-base-mlx", input_path = "{wav}", options = { language = "en" } }
+
+[realtime.local.stt.job]
+tool = "get_job"
+arguments = { job_id = "{job_id}" }
+poll_interval_ms = 250
+timeout_ms = 120000
+
+[realtime.local.tts]
+backend = "mcp"
+url = "http://127.0.0.1:5051/mcp"
+tool = "submit_inference"
+arguments = { model_id = "hf:mlx-community/Kokoro-82M-8bit", prompt = "{text}", options = { voice = "af_heart", language = "en" } }
+
+[realtime.local.tts.job]
+tool = "get_job"
+arguments = { job_id = "{job_id}" }
+poll_interval_ms = 250
+timeout_ms = 120000
+
+[realtime.local.playback]
+player = ["afplay", "{wav}"]
+```
+
+### 6. Test it in the TUI
+
+```bash
+mkdir -p /tmp/voice-test && cd /tmp/voice-test && git init -q
+RUST_LOG=codex_tui=debug,codex_local_voice=debug ~/Documents/Projects/codex-voice/codex-rs/target/debug/codex
+```
+
+(Adjust the path if the repo is elsewhere. Option (a) without config: add
+`--oss --local-provider ollama -m gpt-oss:20b`.)
+
+1. Answer the folder trust prompt with the keyboard if it appears. Then you
+   see "Voice conversation started (local speech)." and the
+   footer shows `voice ● listening`. If not, press F8.
+2. Say "what files are in this folder". The footer shows `hearing you`, then
+   `transcribing`; your words appear as a user message and a turn starts.
+   When it ends you hear a one or two sentence answer (code is never read
+   out; long answers end with "Details are on screen.").
+3. Say "create a file called hello.txt containing hi". When the approval
+   prompt opens you hear "Codex wants to … Say approve or deny."
+4. Say "approve". You hear "Approve … ? Say confirm." Nothing runs yet.
+   Say "confirm". The command runs and the turn continues.
+5. Ask for something else that runs a command ("delete hello.txt"). At the
+   prompt say "no". You hear "Denied." and nothing is sent to the model.
+6. Say "what's running". You hear the agent list (a voice command; no turn
+   starts).
+7. Press F9. The footer shows `muted`; speech in progress stops; talking does
+   nothing. Press F9 again: `listening`.
+8. Type a question and press Enter. The answer is shown but not spoken.
+9. Press F8. You see "Voice conversation ended." and the footer strip goes
+   away. `pgrep -fl "ffmpeg|mlx_whisper|afplay"` in another terminal prints
+   nothing. Quitting Codex (`/quit`) also stops them.
+
+Keys: F8 or `/voice` toggles, F9 or `/voice mute` mutes (and cuts off speech).
+Esc is not bound to "stop speaking": it already primes backtrack when the
+composer is empty and interrupts a running turn. While an approval prompt is
+open, speech that is not an answer or a voice command is not sent; Codex says
+"Say approve or deny."
+
+### 7. What to report
+
+In the Mac outbox or on the issue:
+- which model option (a/b/c) and whether turns worked at all;
+- for each of steps 6.1–6.9: pass, or what you saw and heard instead;
+- any error message shown in the TUI, word for word (engine errors appear
+  once, with a fix);
+- the log: `tail -n 200 ~/.codex/log/codex-tui.log` (and
+  `grep -i "local voice\|codex_local_voice" ~/.codex/log/codex-tui.log | tail -n 50`).
+  The log only exists with `log_dir` set (step 4); `RUST_LOG` as in step 6.
+
 ## Also on codex-voice
 - `codex-rs/voice-commands` (`codex-voice-commands`): pure parser for spoken
   orchestration / model / machine commands ("what's my desktop agent doing",

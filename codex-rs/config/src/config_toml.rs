@@ -707,6 +707,26 @@ pub struct RealtimeConfig {
     /// over SSH. Only these machines are ever contacted.
     #[serde(default)]
     pub voice_machines: Vec<VoiceMachine>,
+    /// Which voice engine F8, `/voice` and `auto_start` use.
+    #[serde(default)]
+    pub backend: RealtimeBackend,
+    /// `[realtime.local]`: settings for the local voice engine
+    /// (`codex-local-voice`), passed through unchanged. Unset uses its
+    /// defaults for this OS.
+    #[serde(default)]
+    pub local: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The engine behind a voice conversation.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeBackend {
+    /// OpenAI's realtime service over WebRTC (upstream behavior).
+    #[default]
+    Openai,
+    /// Local microphone capture, speech-to-text and text-to-speech
+    /// (`[realtime.local]`); transcripts become ordinary user turns.
+    Local,
 }
 
 /// A machine voice commands may drive over SSH, from `[realtime]
@@ -784,6 +804,8 @@ impl Default for RealtimeConfig {
             auto_start: false,
             voice_commands: default_realtime_voice_commands(),
             voice_machines: Vec::new(),
+            backend: RealtimeBackend::default(),
+            local: None,
         }
     }
 }
@@ -809,6 +831,15 @@ pub struct RealtimeToml {
     /// Each entry is a destination `codex remote attach` accepts, or a table
     /// `{ host, name, codex_bin }`.
     pub voice_machines: Option<Vec<VoiceMachineToml>>,
+    /// Voice engine: `"openai"` (default) uses OpenAI's realtime service;
+    /// `"local"` uses local speech-to-text and text-to-speech configured in
+    /// `[realtime.local]`, and sends each transcript as a user turn.
+    pub backend: Option<RealtimeBackend>,
+    /// Local voice engine settings for `backend = "local"`: the `capture`,
+    /// `vad`, `stt`, `tts`, `playback` and `transcripts` tables of
+    /// `codex-local-voice` (see `codex-rs/local-voice/README.md`). Every table
+    /// is optional; unset values use that crate's defaults for this OS.
+    pub local: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1321,6 +1352,70 @@ voice_machines = [
             "[realtime]\nvoice_machines = [{ name = \"devbox\" }]\n",
             "[realtime]\nvoice_machines = \"devbox\"\n",
             "[realtime]\nvoice_machines = [22]\n",
+        ] {
+            assert!(
+                toml::from_str::<ConfigToml>(invalid).is_err(),
+                "should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_backend_defaults_to_openai_and_parses_local_settings() {
+        let config: ConfigToml =
+            toml::from_str("[realtime]\nauto_start = true\n").expect("realtime should deserialize");
+        let realtime = config.realtime.expect("realtime");
+        assert_eq!(realtime.backend, None);
+        assert_eq!(realtime.local, None);
+        assert_eq!(RealtimeConfig::default().backend, RealtimeBackend::Openai);
+        assert_eq!(RealtimeConfig::default().local, None);
+
+        let config: ConfigToml = toml::from_str(
+            r#"
+[realtime]
+backend = "local"
+auto_start = true
+
+[realtime.local.capture]
+device = "1"
+
+[realtime.local.stt]
+backend = "command"
+command = ["mlx_whisper", "{wav}", "--output-dir", "{outdir}"]
+timeout_ms = 60000
+
+[realtime.local.tts]
+backend = "command"
+command = ["say", "{text}"]
+
+[realtime.local.vad]
+end_silence_ms = 900
+start_threshold_db = 10.5
+"#,
+        )
+        .expect("realtime backend and local settings should deserialize");
+        let realtime = config.realtime.expect("realtime");
+        assert_eq!(realtime.backend, Some(RealtimeBackend::Local));
+        assert_eq!(realtime.auto_start, Some(true));
+        let local = serde_json::Value::Object(realtime.local.expect("local settings"));
+        assert_eq!(
+            local,
+            serde_json::json!({
+                "capture": { "device": "1" },
+                "stt": {
+                    "backend": "command",
+                    "command": ["mlx_whisper", "{wav}", "--output-dir", "{outdir}"],
+                    "timeout_ms": 60000,
+                },
+                "tts": { "backend": "command", "command": ["say", "{text}"] },
+                "vad": { "end_silence_ms": 900, "start_threshold_db": 10.5 },
+            })
+        );
+
+        for invalid in [
+            "[realtime]\nbackend = \"webrtc\"\n",
+            "[realtime]\nbackend = true\n",
+            "[realtime]\nlocal = \"say\"\n",
         ] {
             assert!(
                 toml::from_str::<ConfigToml>(invalid).is_err(),

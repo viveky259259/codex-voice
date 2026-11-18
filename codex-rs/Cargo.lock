@@ -5351,6 +5351,7 @@ dependencies = [
  "codex-history",
  "codex-http-client",
  "codex-install-context",
+ "codex-local-voice",
  "codex-login",
  "codex-mcp",
  "codex-mermaid",

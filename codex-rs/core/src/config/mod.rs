@@ -4858,6 +4858,8 @@ impl Config {
                             .into_iter()
                             .map(Into::into)
                             .collect(),
+                        backend: realtime.backend.unwrap_or(defaults.backend),
+                        local: realtime.local,
                     }
                 }),
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,

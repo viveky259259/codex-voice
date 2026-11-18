@@ -95,14 +95,17 @@ impl ChatWidget {
         {
             return false;
         }
-        if !realtime_voice_supported() {
+        // Local voice needs neither the packaged voice host nor a realtime session type.
+        if !self.local_voice_selected() && !realtime_voice_supported() {
             self.add_info_message(
                 VOICE_UNSUPPORTED_AUTO_START_NOTICE.to_string(),
                 /*hint*/ None,
             );
             return false;
         }
-        if self.config.realtime.session_type != RealtimeWsMode::Conversational {
+        if !self.local_voice_selected()
+            && self.config.realtime.session_type != RealtimeWsMode::Conversational
+        {
             self.add_info_message(
                 "Voice auto-start skipped: set [realtime] type = \"conversational\".".to_string(),
                 /*hint*/ None,
@@ -164,7 +167,8 @@ impl ChatWidget {
                 .len()
     }
 
-    /// Speak a short status line through the call's appendSpeech path.
+    /// Speak a short status line through the call's appendSpeech path, or
+    /// through local text-to-speech in a local voice session.
     pub(super) fn speak_realtime_status(&mut self, text: &str) -> bool {
         if !self.voice_status_available() {
             return false;
@@ -175,6 +179,9 @@ impl ChatWidget {
         let text = limit_words(text, MAX_SPOKEN_WORDS);
         if text.is_empty() {
             return false;
+        }
+        if self.local_voice_running() {
+            return self.speak_local_voice_status(&text);
         }
         let delivery_id = NEXT_REALTIME_SPEECH_DELIVERY_ID.fetch_add(1, Ordering::Relaxed);
         if self
@@ -220,6 +227,8 @@ impl ChatWidget {
         };
         // A new prompt never inherits a half-finished voice approval.
         self.realtime_conversation.voice_controls.voice_approval = None;
+        // Nor waits behind a long spoken answer.
+        self.interrupt_local_voice_answer();
         self.speak_realtime_status(&prompt);
     }
 
@@ -263,30 +272,40 @@ impl ChatWidget {
     /// Route a final user transcript. Approval answers are applied locally;
     /// voice commands go to the app's orchestrator. Approvals always come
     /// first, so a bare "stop" stays an approval abort.
-    pub(super) fn on_realtime_user_utterance(&mut self, text: &str, pre_utterance_generation: u64) {
+    ///
+    /// Returns `true` when the transcript was handled here and is not a
+    /// request for the model.
+    pub(super) fn on_realtime_user_utterance(
+        &mut self,
+        text: &str,
+        pre_utterance_generation: u64,
+    ) -> bool {
         let intent = parse_voice_approval_intent(text);
         if let Some(intent) = intent
             && self.take_consumed_voice_control(VoiceControlSource::Handoff, intent)
         {
             // The model's handoff of these same words already applied them.
             self.keep_in_flight_voice_turns(pre_utterance_generation);
-            return;
+            return true;
         }
         if self.handle_realtime_voice_approval(text) {
             if let Some(intent) = intent {
                 self.remember_consumed_voice_control(VoiceControlSource::Transcript, intent);
             }
             self.keep_in_flight_voice_turns(pre_utterance_generation);
+            true
         } else if self.handle_realtime_voice_command(text) {
             // Approval echoes stay remembered: a voice command is not new speech
             // for the model, so a late approval handoff is still recognized.
             self.keep_in_flight_voice_turns(pre_utterance_generation);
+            true
         } else {
             // A later handoff of ordinary speech must not be mistaken for an old answer.
             self.realtime_conversation
                 .voice_controls
                 .consumed_voice_controls
                 .clear();
+            false
         }
     }
 

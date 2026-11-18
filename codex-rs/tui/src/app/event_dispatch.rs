@@ -2619,6 +2619,15 @@ impl App {
                     owner.stop_if_session_locked();
                 }
             }
+            AppEvent::LocalVoice {
+                thread_id,
+                attempt_id,
+                event,
+            } => {
+                if let Some(owner) = self.voice_widget_for_thread(thread_id) {
+                    owner.on_local_voice_event(attempt_id, event);
+                }
+            }
             AppEvent::RealtimeWebrtcOfferCreated {
                 thread_id,
                 attempt_id,

@@ -6,7 +6,13 @@ use super::*;
 impl ChatWidget {
     pub(crate) fn toggle_realtime_microphone(&mut self) {
         let muted = !self.realtime_conversation.microphone_muted;
-        if let Some(handle) = self.realtime_conversation.handle.as_ref() {
+        if let Some(local) = self.realtime_conversation.local.as_mut() {
+            local.set_muted(muted);
+            if muted {
+                // Muting also cuts off speech in progress; later prompts still play.
+                local.stop_speaking();
+            }
+        } else if let Some(handle) = self.realtime_conversation.handle.as_ref() {
             if let Err(error) = handle.set_microphone_muted(muted) {
                 let (message, cause) = match handle.take_error() {
                     Some((cause, error)) => {
@@ -255,6 +261,8 @@ impl ChatWidget {
             "connecting"
         } else if self.realtime_conversation.microphone_muted {
             "muted"
+        } else if let Some(local) = self.realtime_conversation.local.as_ref() {
+            local.activity_label()
         } else if self
             .realtime_conversation
             .interruption_acknowledged_until

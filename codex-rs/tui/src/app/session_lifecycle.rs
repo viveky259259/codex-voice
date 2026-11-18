@@ -641,8 +641,19 @@ impl App {
         }
         chat_widget.restore_kill_buffer_snapshot(self.chat_widget.take_kill_buffer_snapshot());
         crate::markdown_render::preferences::init(chat_widget.local_settings.tui.rendering);
+        let next_thread_id = chat_widget.thread_id();
         let mut previous = std::mem::replace(&mut self.chat_widget, chat_widget);
-        if previous.realtime_conversation_is_running() {
+        if previous.local_voice_running()
+            && (next_thread_id.is_none() || next_thread_id != previous.thread_id())
+        {
+            // Local voice belongs to the visible thread: leaving it stops the
+            // engine (dropping `previous` kills its children).
+            previous.reset_realtime_conversation();
+            self.chat_widget.add_info_message(
+                "Voice stopped when you left that thread. Press F8 to talk here.".to_string(),
+                /*hint*/ None,
+            );
+        } else if previous.realtime_conversation_is_running() {
             previous.park_voice();
             self.background_voice = Some(Box::new(previous));
         }

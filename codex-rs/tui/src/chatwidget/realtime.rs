@@ -4,6 +4,7 @@
 //! Speech recovery suppresses stale queued answers while preserving unspoken text fallbacks.
 
 mod failure_metrics;
+mod local_voice;
 mod recording_controls;
 mod session_lock;
 mod transcript_replay;
@@ -188,6 +189,8 @@ pub(super) struct RealtimeConversationUiState {
     pending_speech: VecDeque<PendingRealtimeSpeech>,
     // Boxed so voice-first state does not grow every `ChatWidget` move.
     voice_controls: Box<voice_status::VoiceControlState>,
+    /// The local voice engine (`[realtime] backend = "local"`) while it runs.
+    local: Option<Box<local_voice::LocalVoiceSession>>,
 }
 
 impl RealtimeConversationUiState {
@@ -320,7 +323,7 @@ impl ChatWidget {
             return;
         }
 
-        if !realtime_voice_supported() {
+        if !self.local_voice_selected() && !realtime_voice_supported() {
             self.add_error_message(
                 "Voice requires macOS, an MSVC-based Windows build, or a glibc-based Linux build."
                     .to_string(),
@@ -339,6 +342,10 @@ impl ChatWidget {
     }
 
     fn start_realtime_conversation(&mut self, thread_id: ThreadId) {
+        if self.local_voice_selected() {
+            self.start_local_voice_conversation(thread_id);
+            return;
+        }
         let Some(audio) = self.realtime_audio_settings() else {
             return;
         };
@@ -395,6 +402,12 @@ impl ChatWidget {
             self.realtime_conversation.phase,
             RealtimeConversationPhase::Inactive | RealtimeConversationPhase::Stopping
         ) {
+            return;
+        }
+        if self.local_voice_running() {
+            self.reset_realtime_conversation();
+            self.add_info_message("Voice conversation ended.".to_string(), /*hint*/ None);
+            self.request_redraw();
             return;
         }
         self.capture_realtime_session_duration();
@@ -652,6 +665,10 @@ impl ChatWidget {
     }
 
     pub(super) fn note_realtime_typed_input(&mut self, text: &str) {
+        if self.local_voice_running() {
+            // Local turns are attributed to voice when their user item arrives.
+            return;
+        }
         self.invalidate_realtime_voice_input();
         if self.realtime_conversation.phase == RealtimeConversationPhase::Active {
             self.realtime_conversation.pending_typed_input = Some(text.to_string());
@@ -697,6 +714,9 @@ impl ChatWidget {
             if realtime_delegation_input(items).is_some() {
                 self.remember_realtime_delegated_reasoning_turn(turn_id);
             }
+            return;
+        }
+        if self.note_local_voice_user_item(turn_id, items) {
             return;
         }
         let matches_local_typed_input = self
@@ -1360,6 +1380,9 @@ impl ChatWidget {
     }
 
     fn forget_realtime_turn_origin(&mut self, turn_id: &str) {
+        if let Some(local) = self.realtime_conversation.local.as_mut() {
+            local.forget_turn(turn_id);
+        }
         self.realtime_conversation.turn_origins.remove(turn_id);
         self.realtime_conversation
             .delegated_reasoning_turns
@@ -1967,6 +1990,10 @@ impl ChatWidget {
         }
         if let Some(handle) = self.realtime_conversation.handle.take() {
             handle.close();
+        }
+        // Kills the local engine's capture, speech-to-text and player children.
+        if let Some(local) = self.realtime_conversation.local.take() {
+            local.shutdown_in_background();
         }
         // Direct resets (for example, switching to a resumed thread) do not
         // pass through the normal stop/close transcript flush.

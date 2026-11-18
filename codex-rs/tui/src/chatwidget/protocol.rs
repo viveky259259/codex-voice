@@ -493,9 +493,10 @@ impl ChatWidget {
                     );
                 }
                 if replay_kind.is_none()
-                    && let Some((item, _)) = last_agent_message
+                    && let Some((item, text)) = last_agent_message
                 {
                     self.speak_completed_realtime_delegation(&notification.turn.id, item);
+                    self.speak_local_voice_answer(&notification.turn.id, text);
                 }
                 if replay_kind.is_none() {
                     question_drafts = self.take_question_drafts();

@@ -53,41 +53,8 @@ impl ChatWidget {
                 text_elements,
             } => {
                 let user_message = self.user_message_from_submission(text, text_elements);
-                if user_message.text.is_empty()
-                    && user_message.local_images.is_empty()
-                    && user_message.remote_image_urls.is_empty()
-                {
+                if !self.submit_entered_user_message(user_message, ShellEscapePolicy::Allow) {
                     return;
-                }
-                self.app_event_tx.send(AppEvent::FollowTranscript);
-                let should_submit_now = !self.thread_stream_disconnected
-                    && self.is_session_configured()
-                    && !self.is_plan_streaming_in_tui()
-                    && !self.input_queue.submissions_paused()
-                    && !self.input_queue.rate_limit_recovery_pending
-                    && (!self.input_queue.user_turn_pending_start
-                        || self.turn_lifecycle.agent_turn_running);
-                if should_submit_now {
-                    if self.only_user_shell_commands_running()
-                        && !user_message.text.starts_with('!')
-                    {
-                        self.queue_user_message(user_message);
-                        return;
-                    }
-                    // Submitted is emitted when user submits.
-                    // Reset any reasoning header only when we are actually submitting a turn.
-                    self.reasoning_buffer.clear();
-                    self.reasoning_header = None;
-                    self.reasoning_summary_parts.clear();
-                    self.set_status_header(String::from("Working"));
-                    self.submit_user_message_with_history_and_shell_escape_policy(
-                        user_message,
-                        UserMessageHistoryRecord::UserMessageText,
-                        ShellEscapePolicy::Allow,
-                        UserMessageSource::DirectEnter,
-                    );
-                } else {
-                    self.queue_user_message(user_message);
                 }
             }
             InputResult::Queued {
@@ -122,6 +89,54 @@ impl ChatWidget {
         if had_modal_or_popup && self.bottom_pane.no_modal_or_popup_active() {
             self.maybe_send_next_queued_input();
         }
+    }
+
+    /// Submit a message as Enter in the composer does: start a turn, steer the
+    /// running one, or queue it when the session cannot take input yet. Local
+    /// voice transcripts use the same path.
+    ///
+    /// Returns `false` when there was nothing to submit, or when the message
+    /// was queued behind running shell commands.
+    pub(super) fn submit_entered_user_message(
+        &mut self,
+        user_message: UserMessage,
+        shell_escape_policy: ShellEscapePolicy,
+    ) -> bool {
+        if user_message.text.is_empty()
+            && user_message.local_images.is_empty()
+            && user_message.remote_image_urls.is_empty()
+        {
+            return false;
+        }
+        self.app_event_tx.send(AppEvent::FollowTranscript);
+        let should_submit_now = !self.thread_stream_disconnected
+            && self.is_session_configured()
+            && !self.is_plan_streaming_in_tui()
+            && !self.input_queue.submissions_paused()
+            && !self.input_queue.rate_limit_recovery_pending
+            && (!self.input_queue.user_turn_pending_start
+                || self.turn_lifecycle.agent_turn_running);
+        if should_submit_now {
+            if self.only_user_shell_commands_running() && !user_message.text.starts_with('!') {
+                self.queue_user_message(user_message);
+                return false;
+            }
+            // Submitted is emitted when user submits.
+            // Reset any reasoning header only when we are actually submitting a turn.
+            self.reasoning_buffer.clear();
+            self.reasoning_header = None;
+            self.reasoning_summary_parts.clear();
+            self.set_status_header(String::from("Working"));
+            self.submit_user_message_with_history_and_shell_escape_policy(
+                user_message,
+                UserMessageHistoryRecord::UserMessageText,
+                shell_escape_policy,
+                UserMessageSource::DirectEnter,
+            );
+        } else {
+            self.queue_user_message(user_message);
+        }
+        true
     }
 
     pub(super) fn defer_input_until_settings_applied(&mut self) {

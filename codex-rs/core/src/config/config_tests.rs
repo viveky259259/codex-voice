@@ -23,6 +23,7 @@ use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ExperimentalRequestUserInput;
 use codex_config::config_toml::ProjectConfig;
+use codex_config::config_toml::RealtimeBackend;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::RealtimeToml;
 use codex_config::config_toml::RealtimeTransport;
@@ -14011,6 +14012,8 @@ voice = "cedar"
             auto_start: None,
             voice_commands: None,
             voice_machines: None,
+            backend: None,
+            local: None,
         })
     );
 
@@ -14032,6 +14035,8 @@ voice = "cedar"
             auto_start: false,
             voice_commands: true,
             voice_machines: Vec::new(),
+            backend: RealtimeBackend::Openai,
+            local: None,
         }
     );
     Ok(())

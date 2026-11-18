@@ -4604,6 +4604,25 @@
       },
       "type": "object"
     },
+    "RealtimeBackend": {
+      "description": "The engine behind a voice conversation.",
+      "oneOf": [
+        {
+          "description": "OpenAI's realtime service over WebRTC (upstream behavior).",
+          "enum": [
+            "openai"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Local microphone capture, speech-to-text and text-to-speech (`[realtime.local]`); transcripts become ordinary user turns.",
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "RealtimeConversationVersion": {
       "enum": [
         "v1",
@@ -4618,6 +4637,19 @@
         "auto_start": {
           "description": "Start a voice conversation automatically once the TUI's first thread exists. Defaults to `false`; voice-first setups set it to `true`.",
           "type": "boolean"
+        },
+        "backend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RealtimeBackend"
+            }
+          ],
+          "description": "Voice engine: `\"openai\"` (default) uses OpenAI's realtime service; `\"local\"` uses local speech-to-text and text-to-speech configured in `[realtime.local]`, and sends each transcript as a user turn."
+        },
+        "local": {
+          "additionalProperties": true,
+          "description": "Local voice engine settings for `backend = \"local\"`: the `capture`, `vad`, `stt`, `tts`, `playback` and `transcripts` tables of `codex-local-voice` (see `codex-rs/local-voice/README.md`). Every table is optional; unset values use that crate's defaults for this OS.",
+          "type": "object"
         },
         "transport": {
           "$ref": "#/definitions/RealtimeTransport"
