@@ -96,7 +96,7 @@ test it. This request tests the audio engine on its own with its CLI.
 
    [stt]
    backend = "command"
-   command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+   command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
               "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
    timeout_ms = 60000
 
@@ -119,7 +119,7 @@ test it. This request tests the audio engine on its own with its CLI.
    backend = "mcp"
    url = "http://127.0.0.1:5051/mcp"
    tool = "submit_inference"
-   arguments = { model_id = "hf:mlx-community/whisper-base-mlx", input_path = "{wav}", options = { language = "en" } }
+   arguments = { model_id = "hf:mlx-community/whisper-large-v3-turbo", input_path = "{wav}", options = { language = "en" } }
 
    [stt.job]
    tool = "get_job"
@@ -221,7 +221,7 @@ ffmpeg -hide_banner -f avfoundation -list_devices true -i ""   # note the index 
 ```
 
 These match the engine's macOS defaults (`mlx_whisper ... --model
-mlx-community/whisper-base-mlx`, `say`, `afplay`). The first transcription
+mlx-community/whisper-large-v3-turbo`, `say`, `afplay`). The first transcription
 downloads the whisper model, so it is slow once.
 
 Microphone access: System Settings → Privacy & Security → Microphone → turn on
@@ -239,7 +239,7 @@ device = "0"
 
 [stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 timeout_ms = 60000
 
@@ -354,7 +354,7 @@ device = "0"
 
 [realtime.local.stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 timeout_ms = 60000
 
@@ -383,7 +383,7 @@ Alternative, the local-agents MCP server for both directions: start it
 backend = "mcp"
 url = "http://127.0.0.1:5051/mcp"
 tool = "submit_inference"
-arguments = { model_id = "hf:mlx-community/whisper-base-mlx", input_path = "{wav}", options = { language = "en" } }
+arguments = { model_id = "hf:mlx-community/whisper-large-v3-turbo", input_path = "{wav}", options = { language = "en" } }
 
 [realtime.local.stt.job]
 tool = "get_job"

@@ -55,14 +55,14 @@ auto_start = true       # start listening as soon as a session opens
 voice_commands = true   # the default; false sends every utterance to the model
 
 # Optional: everything below has macOS defaults (ffmpeg device 0,
-# mlx_whisper whisper-base, say, afplay). Same tables as codex-local-voice's
+# mlx_whisper whisper-large-v3-turbo, say, afplay). Same tables as codex-local-voice's
 # config: capture, vad, stt, tts, playback, transcripts.
 [realtime.local.capture]
 device = "0"            # ffmpeg -f avfoundation -list_devices true -i ""
 
 [realtime.local.stt]
 backend = "command"
-command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-large-v3-turbo",
            "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
 
 [realtime.local.tts]
