@@ -3,9 +3,12 @@ name: codex-voice
 # Tests for the crates this fork adds or changes. Upstream's own workflows also
 # run on the fork; this one covers the fork's features on Linux and macOS.
 
+# Runs on codex-voice, which only receives tested work. wip is pushed many
+# times an hour, which would cancel every run before it finished; run it on
+# wip by hand from the Actions tab (workflow_dispatch) when needed.
 on:
   push:
-    branches: [codex-voice, wip]
+    branches: [codex-voice]
   pull_request:
     branches: [codex-voice]
   workflow_dispatch:
