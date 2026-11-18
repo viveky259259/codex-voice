@@ -106,6 +106,7 @@ members = [
     "realtime-webrtc",
     "voice-host",
     "voice-commands",
+    "local-voice",
     "protocol",
     "protocol/tests/support",
     "prompts",
@@ -287,6 +288,7 @@ codex-mxc-sandbox = { path = "mxc-sandbox" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-orchestrator = { path = "orchestrator" }
+codex-local-voice = { path = "local-voice" }
 codex-otel = { path = "otel" }
 codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }

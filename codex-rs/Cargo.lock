@@ -4144,6 +4144,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-local-voice"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "futures",
+ "libc",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.9.11+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "codex-login"
 version = "0.0.0"
 dependencies = [
