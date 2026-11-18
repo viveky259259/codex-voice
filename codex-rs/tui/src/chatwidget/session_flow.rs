@@ -113,7 +113,7 @@ impl ChatWidget {
             });
         }
         self.realtime_conversation_available_for_thread =
-            super::realtime::realtime_voice_supported();
+            self.local_voice_selected() || super::realtime::realtime_voice_supported();
         self.bottom_pane
             .set_voice_command_enabled(self.realtime_conversation_available_for_thread);
         self.bottom_pane

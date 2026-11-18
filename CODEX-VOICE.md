@@ -10,6 +10,7 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 | Feature | Where | Status |
 |---|---|---|
 | Voice-first TUI: auto-start, spoken approvals with confirmation, spoken status | `codex-rs/tui` | Tested (no-audio harness). Live audio: verify on a Mac. |
+| Local voice (recommended): local speech-to-text and text-to-speech, no OpenAI realtime service | `codex-rs/local-voice`, `codex-rs/tui/src/chatwidget/realtime/local_voice.rs` | Engine tested with fake audio commands; TUI wiring tested with a fake engine. Live audio: verify on a Mac (`HANDOFF.md`, "Local voice on the Mac"). |
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
 | Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Wired into the TUI. |
 | Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator`, `codex-rs/tui/src/app/voice_command*.rs` | Wired into the TUI for this machine's agents and for the machines in `[realtime] voice_machines` (over SSH). Tested against fake app servers and a fake `ssh`; not yet with a real remote host or a live voice session. |
@@ -34,20 +35,56 @@ RUST_MIN_STACK=8388608 cargo test -p codex-tui --lib -- realtime approval voice
 
 ## Voice
 
-Live voice needs Codex's packaged voice helper (`codex-voice-host`) and
-GStreamer 1.28 or newer, which in practice means macOS, glibc Linux or Windows
-with GStreamer installed. Voice uses OpenAI's realtime service.
+Local voice is the recommended voice path. It needs no OpenAI realtime
+service and no voice host: ffmpeg captures the microphone, a local
+speech-to-text command (mlx_whisper on macOS) transcribes each utterance, and
+`say` speaks. Each transcript is handled as a spoken approval answer, then as
+a voice command, and otherwise submitted exactly like a typed message (it
+steers a running turn the way Enter does). Prompts and outcomes are spoken,
+and so is a short summary of each answer to a spoken request (at most two
+sentences, no code; "Details are on screen." when shortened). Answers to
+typed requests are not spoken. Any text model works, including Ollama and
+Claude through the proxy below.
 
 `~/.codex/config.toml`:
 
 ```toml
 [realtime]
-type = "conversational"
-auto_start = true   # start listening as soon as a session opens
+backend = "local"       # default "openai": OpenAI realtime (upstream behavior)
+auto_start = true       # start listening as soon as a session opens
 voice_commands = true   # the default; false sends every utterance to the model
+
+# Optional: everything below has macOS defaults (ffmpeg device 0,
+# mlx_whisper whisper-base, say, afplay). Same tables as codex-local-voice's
+# config: capture, vad, stt, tts, playback, transcripts.
+[realtime.local.capture]
+device = "0"            # ffmpeg -f avfoundation -list_devices true -i ""
+
+[realtime.local.stt]
+backend = "command"
+command = ["mlx_whisper", "{wav}", "--model", "mlx-community/whisper-base-mlx",
+           "--output-format", "txt", "--output-dir", "{outdir}", "--verbose", "False"]
+
+[realtime.local.tts]
+backend = "command"
+command = ["say", "{text}"]
 ```
 
-F8 or `/voice` still toggles voice by hand; F9 mutes.
+Install `brew install ffmpeg` and `uv tool install mlx-whisper`, and give the
+terminal microphone access (System Settings → Privacy & Security →
+Microphone). A missing program or a denied microphone is reported once, with
+the fix. See `codex-rs/local-voice/README.md` for other speech-to-text and
+text-to-speech backends (whisper.cpp server, Kokoro, an MCP server), and
+`HANDOFF.md` ("Local voice on the Mac") for a step-by-step test.
+
+F8 or `/voice` toggles voice by hand; F9 mutes the microphone and cuts off
+speech in progress. While an approval prompt is open, speech that is neither
+an answer nor a voice command is not sent ("Say approve or deny.").
+
+With `backend = "openai"`, live voice needs Codex's packaged voice helper
+(`codex-voice-host`), GStreamer 1.28 or newer and `type = "conversational"`,
+and uses OpenAI's realtime service. With a ChatGPT login this fork's realtime
+call currently fails (404), so prefer the local backend.
 
 Spoken approvals, while an approval prompt is open:
 
@@ -61,7 +98,8 @@ Spoken approvals, while an approval prompt is open:
 
 Anything with a negation or hedge ("don't approve", "maybe") is never an
 answer. Only your own words count: if the voice model relays "confirm" on your
-behalf, nothing is approved.
+behalf, nothing is approved. (Local voice has no voice model: only your
+transcript is ever read.)
 
 Voice commands, during a voice conversation (approvals come first while a
 prompt is open):

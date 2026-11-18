@@ -29,6 +29,23 @@ impl App {
     }
 
     pub(super) async fn stop_realtime_conversation(&mut self, app_server: &mut AppServerSession) {
+        // Wait for a local voice engine's children (capture, speech-to-text,
+        // player) to be killed and reaped before going on.
+        let local_shutdowns: Vec<_> = self
+            .background_voice
+            .as_mut()
+            .and_then(|owner| owner.take_local_voice_shutdown())
+            .into_iter()
+            .chain(self.chat_widget.take_local_voice_shutdown())
+            .collect();
+        for shutdown in local_shutdowns {
+            if tokio::time::timeout(REALTIME_STOP_TIMEOUT, shutdown)
+                .await
+                .is_err()
+            {
+                tracing::warn!("timed out stopping local voice");
+            }
+        }
         let thread_id = self
             .background_voice
             .as_mut()

@@ -1528,6 +1528,14 @@ pub(crate) enum AppEvent {
         action: AstraModelPickerAction,
     },
 
+    /// An event from the local voice engine of a `[realtime] backend = "local"`
+    /// session, for the attempt that started it.
+    LocalVoice {
+        thread_id: ThreadId,
+        attempt_id: u64,
+        event: codex_local_voice::LocalVoiceEvent,
+    },
+
     /// Result of creating a TUI-owned WebRTC offer for an active thread.
     RealtimeWebrtcOfferCreated {
         thread_id: ThreadId,
