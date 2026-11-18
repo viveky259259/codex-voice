@@ -52,6 +52,12 @@ pub enum LocalVoiceEvent {
     },
     SpeakingStarted,
     SpeakingFinished,
+    /// The capture command exited cleanly (status 0), for example at the end
+    /// of a file fed in as the microphone. Listening has stopped, but this is
+    /// not an error; queued transcriptions still finish.
+    CaptureEnded {
+        message: String,
+    },
     Error {
         stage: VoiceStage,
         message: String,
@@ -422,9 +428,17 @@ async fn audio_loop(
             for event in vad.flush() {
                 handle_vad_event(&shared, &utterances, event).await;
             }
-            let message = capture.exit_message().await;
+            let exit = capture.exit().await;
             shared.capture_pid.store(0, Ordering::SeqCst);
-            shared.error(VoiceStage::Capture, message).await;
+            match exit {
+                crate::capture::CaptureExit::Clean(message) => {
+                    tracing::info!("{message}");
+                    shared.emit(LocalVoiceEvent::CaptureEnded { message }).await;
+                }
+                crate::capture::CaptureExit::Failed(message) => {
+                    shared.error(VoiceStage::Capture, message).await;
+                }
+            }
             return;
         };
         if shared.muted.load(Ordering::SeqCst) {

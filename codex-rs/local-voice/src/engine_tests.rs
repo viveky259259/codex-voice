@@ -452,3 +452,26 @@ async fn muted_audio_is_ignored() {
     );
     voice.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clean_capture_exit_is_not_an_error() {
+    let fx = Fixture::new();
+    let capture = CaptureConfig {
+        enabled: true,
+        command: vec![fx.script("fake-ffmpeg", "exit 0")],
+        device: String::new(),
+    };
+    let (voice, mut events) = LocalVoice::start(config(capture, fx.stt("x"), fx.speaker(0)));
+    let seen = wait_for(&mut events, |event| {
+        matches!(
+            event,
+            LocalVoiceEvent::CaptureEnded { .. } | LocalVoiceEvent::Error { .. }
+        )
+    })
+    .await;
+    let LocalVoiceEvent::CaptureEnded { message } = seen.last().unwrap() else {
+        panic!("expected CaptureEnded, got {seen:?}");
+    };
+    assert!(message.contains("exited cleanly"), "{message}");
+    voice.shutdown().await;
+}

@@ -76,14 +76,25 @@ impl Capture {
 
     /// After stdout ended: why the command stopped, with its stderr tail.
     pub async fn exit_message(&mut self) -> String {
+        self.exit().await.message().to_string()
+    }
+
+    /// After stdout ended: whether the command exited cleanly, and why it
+    /// stopped. A clean exit (status 0) is how a finite input such as a file
+    /// fed in as the microphone ends; it is not an error.
+    pub async fn exit(&mut self) -> CaptureExit {
         let status =
             tokio::time::timeout(std::time::Duration::from_secs(2), self.guard.wait()).await;
         let tail = self.guard.stderr_tail().await;
         match status {
-            Ok(Ok(status)) => format!(
+            Ok(Ok(status)) if status.success() => CaptureExit::Clean(format!(
+                "capture ended: `{}` exited cleanly",
+                program_name(&self.argv)
+            )),
+            Ok(Ok(status)) => CaptureExit::Failed(format!(
                 "capture stopped: {}",
                 failure_message(&self.argv, status, &tail)
-            ),
+            )),
             _ => {
                 self.guard.kill_and_wait().await;
                 let mut message = format!(
@@ -94,13 +105,30 @@ impl Capture {
                     message.push_str(": ");
                     message.push_str(&tail);
                 }
-                message
+                CaptureExit::Failed(message)
             }
         }
     }
 
     pub async fn stop(&mut self) {
         self.guard.kill_and_wait().await;
+    }
+}
+
+/// How the capture command ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaptureExit {
+    /// Exited with status 0, e.g. the end of a file fed in as the microphone.
+    Clean(String),
+    /// Exited with an error, was killed, or closed its output and hung.
+    Failed(String),
+}
+
+impl CaptureExit {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Clean(message) | Self::Failed(message) => message,
+        }
     }
 }
 

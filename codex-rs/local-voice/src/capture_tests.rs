@@ -61,3 +61,25 @@ async fn missing_program_is_an_error_not_a_panic() {
     let err = Capture::spawn(&config).err().unwrap();
     assert!(err.to_string().contains("/nonexistent/ffmpeg"), "{err}");
 }
+
+#[tokio::test]
+async fn exit_distinguishes_clean_and_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let clean = write_script(dir.path(), "clean", "exit 0");
+    let failed = write_script(dir.path(), "failed", "echo boom >&2\nexit 3");
+    for (script, want_clean) in [(clean, true), (failed, false)] {
+        let config = CaptureConfig {
+            enabled: true,
+            command: vec![path_str(&script)],
+            device: String::new(),
+        };
+        let mut capture = Capture::spawn(&config).unwrap();
+        assert_eq!(capture.next_samples().await, None);
+        let exit = capture.exit().await;
+        assert_eq!(
+            matches!(exit, crate::CaptureExit::Clean(_)),
+            want_clean,
+            "{exit:?}"
+        );
+    }
+}
