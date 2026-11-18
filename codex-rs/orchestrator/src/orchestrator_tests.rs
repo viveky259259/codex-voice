@@ -4,6 +4,7 @@ use crate::AgentInfo;
 use crate::AgentStatus;
 use crate::ItemStatus;
 use crate::MachineError;
+use crate::MachineLink;
 use crate::MachineSnapshot;
 use crate::Orchestrator;
 use crate::Outcome;
@@ -449,4 +450,246 @@ async fn spoken_replies_stay_short() {
         })
         .await;
     assert_spoken_limit(&steer);
+}
+
+/// desktop (this machine) runs build; devbox (remote, connected) has tests
+/// idle; mac-studio is still connecting; nas is down.
+fn across_machines() -> (Orchestrator, Arc<Mutex<FakeState>>, Arc<Mutex<FakeState>>) {
+    let desktop = FakeBackend::new(
+        "desktop",
+        vec![running("t-build", "build", "cargo build --release")],
+    );
+    let devbox =
+        FakeBackend::new("devbox", vec![agent("t-tests", "tests", AgentStatus::Idle)]).remote();
+    let studio = FakeBackend::new("mac-studio", vec![agent("t-x", "x", AgentStatus::Idle)])
+        .with_behavior(Behavior::Connecting);
+    let nas = FakeBackend::new("nas", vec![agent("t-y", "y", AgentStatus::Running)]).with_behavior(
+        Behavior::Dead("ssh: connect to host nas port 22: No route to host".to_string()),
+    );
+    let desktop_state = Arc::clone(&desktop.state);
+    let devbox_state = Arc::clone(&devbox.state);
+    let engine = orchestrator(vec![desktop, devbox, studio, nas])
+        .with_known_machines(vec!["laptop".to_string(), "devbox".to_string()]);
+    (engine, desktop_state, devbox_state)
+}
+
+#[tokio::test]
+async fn what_s_running_spans_machines_and_names_the_missing_ones() {
+    let (mut engine, _, _) = across_machines();
+
+    let listed = engine.handle_utterance("what's running", false).await;
+    assert_eq!(listed.status, OutcomeStatus::Done);
+    assert_eq!(
+        listed.spoken,
+        "Two agents. Build on desktop: running cargo build, 2 minutes. Tests on devbox: idle. \
+         Mac studio is still connecting, nas didn't answer."
+    );
+    assert_spoken_limit(&listed);
+    assert_eq!(
+        listed.screen,
+        "build on desktop: running cargo build, 2 minutes\n\
+         tests on devbox: idle\n\
+         mac-studio: connecting…\n\
+         nas: unreachable (unreachable: ssh: connect to host nas port 22: No route to host)"
+    );
+    assert_eq!(
+        engine.last_snapshot().map(|snapshot| snapshot
+            .failures()
+            .map(|(machine, error)| (machine.to_string(), error.clone()))
+            .collect::<Vec<_>>()),
+        Some(vec![
+            ("mac-studio".to_string(), MachineError::Connecting),
+            (
+                "nas".to_string(),
+                MachineError::Backend {
+                    message: "unreachable: ssh: connect to host nas port 22: No route to host"
+                        .to_string()
+                }
+            ),
+        ])
+    );
+    // Only reachable machines contribute agents to the parser context.
+    assert_eq!(
+        engine.voice_context().known_agents,
+        vec![
+            agent_ref("t-build", "build", "desktop"),
+            agent_ref("t-tests", "tests", "devbox"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn agents_that_need_you_come_first_then_each_machine_in_turn() {
+    let desktop = FakeBackend::new(
+        "desktop",
+        vec![
+            agent("t-docs", "docs", AgentStatus::Idle),
+            running("t-build", "build", "cargo build --release"),
+        ],
+    );
+    let devbox = FakeBackend::new(
+        "devbox",
+        vec![
+            running("t-lint", "lint", "cargo clippy"),
+            agent("t-tests", "tests", AgentStatus::WaitingForApproval),
+        ],
+    )
+    .remote();
+    let mut engine = orchestrator(vec![desktop, devbox]);
+
+    let listed = engine.handle_utterance("list my agents", false).await;
+    assert_eq!(
+        listed.spoken,
+        "Four agents. Tests on devbox: waiting for your approval. Build on desktop: running \
+         cargo build, 2 minutes. Docs on desktop: idle. Plus one more."
+    );
+    assert_spoken_limit(&listed);
+}
+
+#[tokio::test]
+async fn several_missing_machines_are_named_in_one_clause() {
+    let desktop = FakeBackend::new("desktop", Vec::new());
+    let down = |name: &str| {
+        FakeBackend::new(name, Vec::new()).with_behavior(Behavior::Dead("refused".to_string()))
+    };
+    let connecting =
+        |name: &str| FakeBackend::new(name, Vec::new()).with_behavior(Behavior::Connecting);
+    let mut engine = orchestrator(vec![
+        desktop,
+        connecting("devbox"),
+        connecting("mac-studio"),
+        down("nas"),
+        down("pi"),
+    ]);
+    let listed = engine.handle_utterance("what's running", false).await;
+    assert_eq!(
+        listed.spoken,
+        "No agents found. Devbox and mac studio are still connecting, nas and pi didn't answer."
+    );
+}
+
+#[tokio::test]
+async fn steering_a_remote_agent_names_the_machine_and_waits_for_confirm() {
+    let (mut engine, desktop, devbox) = across_machines();
+
+    let asked = engine
+        .handle_utterance("tell tests to run the linter", false)
+        .await;
+    assert_eq!(asked.status, OutcomeStatus::AwaitingConfirmation);
+    assert_eq!(
+        asked.spoken,
+        "Tell tests on devbox: run the linter. Say confirm."
+    );
+    assert_eq!(calls(&devbox), Vec::new());
+
+    let done = engine.handle_utterance("confirm", false).await;
+    assert_eq!(
+        done.spoken,
+        "Tests on devbox was idle, so I started a new turn."
+    );
+    assert_eq!(
+        calls(&devbox),
+        vec![Call::Steer {
+            id: "t-tests".to_string(),
+            message: "run the linter".to_string(),
+        }]
+    );
+    assert_eq!(calls(&desktop), Vec::new());
+
+    // Stop on a remote machine also asks first, naming the machine.
+    let stop = engine.handle_utterance("stop tests", false).await;
+    assert_eq!(stop.spoken, "Stop tests on devbox? Say confirm.");
+    engine.cancel();
+
+    // Even a command that skips confirmation waits for it on a remote machine,
+    // but not on this one.
+    let unconfirmed = engine
+        .execute(VoiceCommand::StopAgent {
+            agent: agent_ref("t-tests", "tests", "devbox"),
+            needs_confirmation: false,
+        })
+        .await;
+    assert_eq!(unconfirmed.status, OutcomeStatus::AwaitingConfirmation);
+    assert_eq!(unconfirmed.spoken, "Stop tests on devbox? Say confirm.");
+    let local = engine
+        .execute(VoiceCommand::StopAgent {
+            agent: agent_ref("t-build", "build", "desktop"),
+            needs_confirmation: false,
+        })
+        .await;
+    assert_eq!(local.status, OutcomeStatus::Done);
+    assert_eq!(
+        calls(&desktop),
+        vec![Call::Interrupt {
+            id: "t-build".to_string()
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_connecting_or_dead_machine_fails_only_its_own_commands() {
+    let (mut engine, _, devbox) = across_machines();
+    engine.snapshot().await;
+
+    let connecting = engine
+        .execute(VoiceCommand::AgentStatus {
+            agent: agent_ref("t-x", "x", "mac-studio"),
+        })
+        .await;
+    assert_eq!(connecting.status, OutcomeStatus::Failed);
+    assert_eq!(
+        connecting.spoken,
+        "Mac studio is still connecting. Try again in a moment."
+    );
+
+    let stop = engine
+        .execute(VoiceCommand::StopAgent {
+            agent: agent_ref("t-y", "y", "nas"),
+            needs_confirmation: true,
+        })
+        .await;
+    assert_eq!(stop.spoken, "Stop y on nas? Say confirm.");
+    let dead = engine.handle_utterance("confirm", false).await;
+    assert_eq!(dead.status, OutcomeStatus::Failed);
+    assert_eq!(dead.spoken, "I can't reach nas.");
+    assert_eq!(
+        dead.screen,
+        "y on nas: unreachable: ssh: connect to host nas port 22: No route to host"
+    );
+
+    // The healthy remote machine still works.
+    let status = engine.handle_utterance("what's tests doing", false).await;
+    assert_eq!(status.status, OutcomeStatus::Done);
+    assert_eq!(status.spoken, "Tests on devbox: idle.");
+    assert_eq!(calls(&devbox), Vec::new());
+}
+
+#[tokio::test]
+async fn list_my_machines_marks_which_ones_are_connected() {
+    let (mut engine, _, _) = across_machines();
+    let outcome = engine.handle_utterance("list my machines", false).await;
+    assert_eq!(outcome.status, OutcomeStatus::Done);
+    assert_eq!(
+        outcome.spoken,
+        "Five machines. Connected: desktop, devbox. Connecting: mac studio. Unreachable: nas. \
+         Not connected: laptop."
+    );
+    assert_eq!(
+        outcome.screen,
+        "desktop: this machine, connected\n\
+         devbox: connected over SSH\n\
+         mac-studio: connecting over SSH…\n\
+         nas: unreachable; retried on the next command\n\
+         laptop: not connected (add it to [realtime] voice_machines to orchestrate it)"
+    );
+    assert_eq!(
+        engine.machine_links(),
+        vec![
+            ("desktop".to_string(), Some(MachineLink::Local)),
+            ("devbox".to_string(), Some(MachineLink::Connected)),
+            ("mac-studio".to_string(), Some(MachineLink::Connecting)),
+            ("nas".to_string(), Some(MachineLink::Unreachable)),
+            ("laptop".to_string(), None),
+        ]
+    );
 }

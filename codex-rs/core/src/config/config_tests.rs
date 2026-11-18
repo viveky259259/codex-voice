@@ -14010,6 +14010,7 @@ voice = "cedar"
             voice: Some(RealtimeVoice::Cedar),
             auto_start: None,
             voice_commands: None,
+            voice_machines: None,
         })
     );
 
@@ -14030,6 +14031,7 @@ voice = "cedar"
             voice: Some(RealtimeVoice::Cedar),
             auto_start: false,
             voice_commands: true,
+            voice_machines: Vec::new(),
         }
     );
     Ok(())

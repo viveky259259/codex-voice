@@ -5,6 +5,7 @@ use crate::AgentBackend;
 use crate::AgentInfo;
 use crate::AgentStatus;
 use crate::InterruptOutcome;
+use crate::MachineLink;
 use crate::Outcome;
 use crate::OutcomeStatus;
 use crate::PendingAction;
@@ -22,6 +23,8 @@ use crate::speech::agent_ref;
 use crate::speech::capitalize;
 use crate::speech::list_screen;
 use crate::speech::list_speech;
+use crate::speech::machines_screen;
+use crate::speech::machines_speech;
 use crate::speech::report_screen;
 use crate::speech::report_speech;
 use crate::speech::spoken;
@@ -292,6 +295,8 @@ impl Orchestrator {
                 needs_confirmation,
             } => {
                 self.last_agent = Some(agent.clone());
+                // Remote machines always confirm, whatever the parser said.
+                let needs_confirmation = needs_confirmation || self.is_remote(&agent);
                 let action = PendingAction::Steer { agent, message };
                 if needs_confirmation {
                     self.await_confirmation(action)
@@ -313,6 +318,7 @@ impl Orchestrator {
                     };
                     return already_idle(&agent, command);
                 }
+                let needs_confirmation = needs_confirmation || self.is_remote(&agent);
                 let action = PendingAction::Stop { agent };
                 if needs_confirmation {
                     self.await_confirmation(action)
@@ -343,8 +349,9 @@ impl Orchestrator {
                 Outcome::new(OutcomeStatus::Failed, &reply, reply.clone(), command)
             }
             VoiceCommand::ListMachines => {
-                let reply = self.reply(&command);
-                let screen = self.voice_context().known_machines.join("\n");
+                let machines = self.machine_links();
+                let reply = machines_speech(&machines);
+                let screen = machines_screen(&machines);
                 Outcome::new(OutcomeStatus::Done, &reply, screen, command)
             }
             VoiceCommand::SwitchModel { .. } | VoiceCommand::AttachMachine { .. } => {
@@ -414,6 +421,29 @@ impl Orchestrator {
             .iter()
             .find(|backend| backend.machine() == machine)
             .map(Box::as_ref)
+    }
+
+    /// Whether the agent's machine is reached over the network. Unknown
+    /// machines count as remote.
+    fn is_remote(&self, agent: &AgentRef) -> bool {
+        self.backend(agent)
+            .is_none_or(|backend| backend.link().is_remote())
+    }
+
+    /// Every backend's machine with its link, then the known machines that
+    /// have no backend.
+    pub fn machine_links(&self) -> Vec<(String, Option<MachineLink>)> {
+        let mut machines: Vec<(String, Option<MachineLink>)> = self
+            .backends
+            .iter()
+            .map(|backend| (backend.machine().to_string(), Some(backend.link())))
+            .collect();
+        for known in &self.known_machines {
+            if !machines.iter().any(|(name, _)| name == known) {
+                machines.push((known.clone(), None));
+            }
+        }
+        machines
     }
 
     fn known_info(&self, agent: &AgentRef) -> Option<&AgentInfo> {

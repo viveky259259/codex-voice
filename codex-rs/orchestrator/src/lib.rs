@@ -30,6 +30,7 @@ pub use agent::ItemStatus;
 pub use agent::SteerOutcome;
 pub use backend::AgentBackend;
 pub use backend::BackendFuture;
+pub use backend::MachineLink;
 pub use orchestrator::DEFAULT_BACKEND_TIMEOUT;
 pub use orchestrator::Orchestrator;
 pub use orchestrator::parse_with_last_agent;

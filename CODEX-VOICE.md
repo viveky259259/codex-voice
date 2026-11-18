@@ -12,7 +12,7 @@ Upstream base: `openai/codex@8011b92`, imported as the first commit on `main`.
 | Voice-first TUI: auto-start, spoken approvals with confirmation, spoken status | `codex-rs/tui` | Tested (no-audio harness). Live audio: verify on a Mac. |
 | Claude models via a local translator | `codex-rs/anthropic-proxy` | Tested against a mock Anthropic server. Real API: not yet. |
 | Voice commands: "what's my desktop agent doing", "switch to Claude"… | `codex-rs/voice-commands` | Parser tested. Wired into the TUI. |
-| Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator`, `codex-rs/tui/src/app/voice_command*.rs` | Wired into the TUI for this machine's agents, over its app server. Tested against a fake app server; not yet in a live voice session. |
+| Orchestration engine: list, read, steer and stop agents across machines | `codex-rs/orchestrator`, `codex-rs/tui/src/app/voice_command*.rs` | Wired into the TUI for this machine's agents and for the machines in `[realtime] voice_machines` (over SSH). Tested against fake app servers and a fake `ssh`; not yet with a real remote host or a live voice session. |
 | `codex remote list` / `codex remote attach` (Tailscale + SSH) | `codex-rs/tailnet`, `app-server-client`, `cli` | Tested on macOS with fake ssh/tailscale against a real local server. Real tailnet: not yet. |
 
 Branches: `codex-voice` holds tested work; `wip` adds work still being tested
@@ -67,17 +67,49 @@ prompt is open):
 
 | Say | Effect |
 |---|---|
-| "what's running", "list my agents" | Lists this machine's loaded agents. |
+| "what's running", "list my agents" | Lists loaded agents on this machine and every configured machine, and names machines that are still connecting or didn't answer. |
 | "what's build doing", "check on build" | Reads that agent's status and latest step. |
 | "tell build to run the tests" | Asks "Tell build on <host>: run the tests. Say confirm."; only "confirm" sends it. |
 | "stop build" | Asks "Stop build on <host>? Say confirm."; only "confirm" interrupts it. |
 | "switch to opus" | Applies the model like the `/model` picker. |
-| "list my machines" | Lists Tailscale peers and `~/.ssh/config` hosts. |
+| "list my machines" | Lists this machine, configured machines (connected, connecting, unreachable), and Tailscale peers / `~/.ssh/config` hosts (not connected). |
 | "connect to studio" | Says "Run codex remote attach studio." (no runtime attach yet). |
 
 Anything else after "Say confirm." cancels. When two agents share a name,
 Codex asks which one. "It" means the last agent you asked about. Everything
 that is not a command goes to the model as before.
+
+### Voice commands across machines
+
+List the machines whose agents voice commands may drive. Only these are ever
+contacted; machines found by `codex remote list` are names only.
+
+```toml
+[realtime]
+voice_machines = [
+  "devbox",                       # any destination `codex remote attach` accepts
+  "me@mac-studio",
+  { host = "ssh://me@10.0.0.7:2222", name = "nas", codex_bin = "/opt/codex/bin/codex" },
+]
+```
+
+Each machine is reached the way `codex remote attach` reaches it: `ssh HOST --
+codex app-server daemon start`, then `ssh HOST -- codex app-server proxy`, with
+`BatchMode=yes` (keys, an agent or Tailscale SSH; no prompts). `codex_bin` (or
+`ssh://HOST?codex_bin=PATH`, or `CODEX_REMOTE_BIN`) points at Codex when it is
+not on the remote non-interactive `PATH`. Machines are named in speech by
+`name`, else the host without user, port or domain ("mac studio").
+
+- Connections start in the background when voice starts and are kept. Until a
+  machine's first connection is up (a command waits at most 1.5 s), it is
+  reported as connecting: "Two agents. Build on desktop: running cargo test,
+  2 minutes. Tests on devbox: idle. Mac studio is still connecting, nas
+  didn't answer."
+- A dropped or failed connection is retried on the next command; a dead
+  machine only fails its own commands ("I can't reach nas.").
+- "tell build to run the tests" asks "Tell build on devbox: run the tests. Say
+  confirm." Steer and stop on another machine always wait for "confirm".
+- When the voice orchestrator stops, its SSH children are killed.
 
 ## Claude models
 

@@ -4634,6 +4634,13 @@
         "voice_commands": {
           "description": "Recognize spoken orchestration commands during a voice conversation: list, check, steer, and stop agents, and switch models. Defaults to `true`; set `false` to send every utterance to the model.",
           "type": "boolean"
+        },
+        "voice_machines": {
+          "description": "Other machines whose agents voice commands may list, read, steer, and stop, over SSH (`ssh HOST -- codex app-server proxy`). Opt-in: machines found by `codex remote list` are never contacted unless listed here. Each entry is a destination `codex remote attach` accepts, or a table `{ host, name, codex_bin }`.",
+          "items": {
+            "$ref": "#/definitions/VoiceMachineToml"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -7830,6 +7837,44 @@
         "high"
       ],
       "type": "string"
+    },
+    "VoiceMachineTableToml": {
+      "additionalProperties": false,
+      "properties": {
+        "codex_bin": {
+          "description": "Codex executable on that machine (default: `codex` on its `PATH`).",
+          "type": "string"
+        },
+        "host": {
+          "description": "Any destination `codex remote attach` accepts.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The name used in speech. Defaults to the host without its user, port, or domain.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host"
+      ],
+      "type": "object"
+    },
+    "VoiceMachineToml": {
+      "anyOf": [
+        {
+          "description": "`\"devbox\"`, `\"me@mac-studio\"`, or `\"ssh://me@devbox:2222\"`.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/VoiceMachineTableToml"
+            }
+          ],
+          "description": "`{ host = \"me@devbox\", name = \"devbox\", codex_bin = \"/opt/codex/bin/codex\" }`."
+        }
+      ],
+      "description": "One `[realtime] voice_machines` entry: a destination string, or a table that also names the machine or its remote Codex binary."
     },
     "WebSearchContextSize": {
       "enum": [
