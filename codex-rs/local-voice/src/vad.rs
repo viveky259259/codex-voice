@@ -12,6 +12,10 @@ pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Frames used to measure the initial noise floor before detecting speech.
 const CALIBRATION_FRAMES: u32 = 10;
+/// Frames averaged into one level for the steadiness check.
+const STEADY_BLOCK: usize = 3;
+/// Frames remembered from before speech, for the background estimate.
+const IDLE_LEVELS: usize = 15;
 /// Per-frame smoothing of the noise floor when the level falls / rises.
 const FLOOR_FALL: f32 = 0.2;
 const FLOOR_RISE: f32 = 0.02;
@@ -49,6 +53,10 @@ pub struct VadConfig {
     /// that was steady from its start is discarded without transcription.
     pub steady_window_ms: u32,
     pub steady_db: f32,
+    /// An utterance also ends when the sound falls back to within this many
+    /// dB of the background heard just before it started, so hiss that sits
+    /// above the floor doesn't keep it open.
+    pub end_margin_db: f32,
 }
 
 impl Default for VadConfig {
@@ -65,7 +73,8 @@ impl Default for VadConfig {
             noise_window_ms: 4000,
             noise_percentile: 0.1,
             steady_window_ms: 600,
-            steady_db: 1.5,
+            steady_db: 2.0,
+            end_margin_db: 3.0,
         }
     }
 }
@@ -119,9 +128,16 @@ pub struct Vad {
     /// Recent frame levels, for the background percentile.
     levels: VecDeque<f32>,
     levels_cap: usize,
-    /// dB levels of the current utterance's most recent frames.
+    /// dB levels of the current utterance, averaged over `STEADY_BLOCK`
+    /// frames so per-frame jitter in hiss doesn't hide that it's steady.
     recent_db: VecDeque<f32>,
     steady_frames: usize,
+    block_sum: f32,
+    block_len: usize,
+    /// Levels of the frames just before speech (the background).
+    idle_levels: VecDeque<f32>,
+    /// The background level heard just before the current utterance.
+    utterance_background: f32,
     pending: Vec<i16>,
     pre_roll: VecDeque<i16>,
     pre_roll_len: usize,
@@ -144,7 +160,11 @@ impl Vad {
             levels: VecDeque::with_capacity(levels_cap),
             levels_cap,
             recent_db: VecDeque::new(),
-            steady_frames,
+            steady_frames: steady_frames.div_ceil(STEADY_BLOCK).max(3),
+            block_sum: 0.0,
+            block_len: 0,
+            idle_levels: VecDeque::with_capacity(IDLE_LEVELS),
+            utterance_background: 0.0,
             pending: Vec::new(),
             pre_roll: VecDeque::with_capacity(pre_roll_len),
             pre_roll_len,
@@ -245,6 +265,10 @@ impl Vad {
 
         match self.state {
             State::Idle => {
+                if self.idle_levels.len() == IDLE_LEVELS {
+                    self.idle_levels.pop_front();
+                }
+                self.idle_levels.push_back(level);
                 if level >= start {
                     self.current = self.pre_roll.drain(..).collect();
                     self.current.extend_from_slice(frame);
@@ -285,7 +309,11 @@ impl Vad {
                     // level no longer count as loud, so a later utterance
                     // must stand out from it.
                     self.raise_floor(steady_level);
-                    if since_start <= self.steady_frames + min_speech_frames as usize {
+                    if since_start
+                        <= self.steady_frames * STEADY_BLOCK
+                            + min_speech_frames as usize
+                            + STEADY_BLOCK
+                    {
                         tracing::debug!(
                             level_db = ratio_to_db(steady_level),
                             "vad: steady sound from the start of the utterance; discarding it as noise"
@@ -294,7 +322,8 @@ impl Vad {
                         return;
                     }
                 }
-                let keep = self.floor * db_to_ratio(self.config.continue_threshold_db);
+                let keep = (self.floor * db_to_ratio(self.config.continue_threshold_db))
+                    .max(self.utterance_background * db_to_ratio(self.config.end_margin_db));
                 let (last_loud_frame, silent_frames) = if level >= keep {
                     (frames, 0)
                 } else {
@@ -324,6 +353,7 @@ impl Vad {
                 last_loud_frame: loud_frames,
                 silent_frames: 0,
             };
+            self.utterance_background = median(&self.idle_levels).unwrap_or(0.0);
             events.push(VadEvent::SpeechStarted);
         }
     }
@@ -331,10 +361,18 @@ impl Vad {
     /// Records a frame level of the utterance in progress. Returns the mean
     /// level when the last `steady_window_ms` stayed within `steady_db`.
     fn note_speech_level(&mut self, level: f32) -> Option<f32> {
+        self.block_sum += level;
+        self.block_len += 1;
+        if self.block_len < STEADY_BLOCK {
+            return None;
+        }
+        let block = self.block_sum / self.block_len as f32;
+        self.block_sum = 0.0;
+        self.block_len = 0;
         if self.recent_db.len() == self.steady_frames {
             self.recent_db.pop_front();
         }
-        self.recent_db.push_back(ratio_to_db(level));
+        self.recent_db.push_back(ratio_to_db(block));
         if self.recent_db.len() < self.steady_frames {
             return None;
         }
@@ -367,6 +405,8 @@ impl Vad {
         self.current.clear();
         self.pre_roll.clear();
         self.recent_db.clear();
+        self.block_sum = 0.0;
+        self.block_len = 0;
         self.state = State::Idle;
         events.push(VadEvent::SpeechDiscarded);
     }
@@ -376,6 +416,12 @@ impl Vad {
         self.state = State::Idle;
         self.pre_roll.clear();
         self.recent_db.clear();
+        self.block_sum = 0.0;
+        self.block_len = 0;
+        // The background before this utterance is the room; don't let the
+        // floor sit below it, or the same hiss starts the next one.
+        let background = self.utterance_background;
+        self.raise_floor(background);
         events.push(VadEvent::SpeechEnded(Utterance {
             samples,
             voiced_ms: self.frames_to_ms(last_loud_frame),
@@ -517,6 +563,16 @@ pub fn rms(samples: &[i16]) -> f32 {
         })
         .sum();
     (sum / samples.len() as f64).sqrt() as f32
+}
+
+fn median(levels: &VecDeque<f32>) -> Option<f32> {
+    if levels.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<f32> = levels.iter().copied().collect();
+    let middle = sorted.len() / 2;
+    let (_, value, _) = sorted.select_nth_unstable_by(middle, f32::total_cmp);
+    Some(*value)
 }
 
 /// The inverse of [`ratio_to_db`]: dBFS back to an i16-scale RMS level.

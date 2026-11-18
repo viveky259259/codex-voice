@@ -197,6 +197,11 @@ end_silence_ms = 700
 max_utterance_ms = 30000
 pre_roll_ms = 300
 min_noise_floor = 60.0         # RMS on the i16 scale
+noise_window_ms = 4000         # the floor follows a low percentile of this window,
+noise_percentile = 0.1         #   in every state, so rising room noise ends utterances
+steady_window_ms = 600         # 600 ms within steady_db is noise, not speech:
+steady_db = 2.0                #   the floor moves up, a steady-from-the-start utterance is discarded
+end_margin_db = 3.0            # end when the sound is back within 3 dB of the pre-speech background
 
 [playback]
 max_chars = 400
@@ -208,10 +213,13 @@ barge_in_min_ms = 300
 [transcripts]
 drop = ["[BLANK_AUDIO]", "(silence)", "[silence]", "(blank audio)", "[no speech]",
         "[inaudible]", "[music]", "(music)"]
-drop_if_short = ["Thank you.", "Thanks.", "Thanks for watching!",
-                 "Thank you for watching.", "You", "Bye."]
-short_utterance_ms = 600
+drop_if_short = ["Thank you.", "Thank you very much.", "Thank you so much.", "Thanks.",
+                 "Thanks for watching!", "Thank you for watching.", "Please subscribe.",
+                 "You", "Bye.", "Hmm.", "Um.", "Uh."]   # Whisper phantoms on noise
+short_utterance_ms = 1500
 drop_bracketed = true
+max_distinct_word_ratio = 0.3  # drop loops like "it is it is it is ..." (>= repeat_min_words)
+repeat_min_words = 8
 ```
 
 On Linux the defaults are `ffmpeg -f pulse -i default`, `whisper-cli`,

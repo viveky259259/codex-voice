@@ -270,3 +270,52 @@ fn steady_hiss_mistaken_for_speech_is_discarded_not_transcribed() {
     let events = run(&mut vad, &speech);
     assert_eq!(utterances(&events).len(), 1, "{events:?}");
 }
+
+/// Hiss whose level wanders ±2 dB every 60 ms, like a real headset mic:
+/// too jittery for a per-frame steadiness check.
+fn jittery_hiss(ms: u32, amplitude: i16, seed: u32) -> Vec<i16> {
+    let mut out = Vec::new();
+    let mut state = seed.wrapping_mul(2_246_822_519).wrapping_add(7);
+    for _ in 0..(ms / 60) {
+        state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let gain = 0.8 + 0.4 * ((state >> 16) % 1000) as f32 / 1000.0;
+        out.extend(noise(60, (f32::from(amplitude) * gain) as i16, state));
+    }
+    out
+}
+
+#[test]
+fn utterance_ends_soon_after_speech_returns_to_the_hiss_before_it() {
+    // A genuinely quiet start, then jittery hiss well above that floor for a
+    // while (discarded or absorbed), then a sentence, then the same hiss.
+    let mut vad = Vad::new(VadConfig::default());
+    let mut input = silence(500, 90);
+    input.extend(jittery_hiss(5_000, 1400, 91));
+    let warmup = run(&mut vad, &input);
+    assert_eq!(utterances(&warmup).len(), 0, "{warmup:?}");
+
+    let mut speech = voice(1500, 14_000.0);
+    speech.extend(jittery_hiss(4_000, 1400, 92));
+    let mut ended_after_ms = None;
+    let mut started = 0;
+    let mut elapsed = 0u32;
+    for chunk in speech.chunks(ms_to_samples(20)) {
+        for event in vad.push(chunk) {
+            match event {
+                VadEvent::SpeechStarted => started += 1,
+                VadEvent::SpeechEnded(_) if ended_after_ms.is_none() => {
+                    ended_after_ms = Some(elapsed.saturating_sub(1500));
+                }
+                _ => {}
+            }
+        }
+        elapsed += 20;
+    }
+    let ended_after_ms = ended_after_ms.expect("utterance never ended");
+    assert!(
+        ended_after_ms <= 1_200,
+        "ended {ended_after_ms} ms after the speech stopped"
+    );
+    // The hiss after it doesn't start another utterance.
+    assert_eq!(started, 1);
+}

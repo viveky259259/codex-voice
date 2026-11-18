@@ -101,6 +101,15 @@ mod tests {
         );
         assert_eq!(clean_transcript("...", 2000, &config), None);
         assert_eq!(clean_transcript("Thank you.", 400, &config), None);
+        // A phantom "you" on 0.8 s of hiss is dropped; real short answers aren't.
+        assert_eq!(clean_transcript("you", 800, &config), None);
+        for answer in ["Yes.", "No.", "Approve.", "Confirm.", "Deny."] {
+            assert_eq!(
+                clean_transcript(answer, 400, &config),
+                Some(answer.to_string()),
+                "{answer}"
+            );
+        }
         assert_eq!(
             clean_transcript(
                 "Það er það er það er það. Það er það er það. Það er það er það.",
