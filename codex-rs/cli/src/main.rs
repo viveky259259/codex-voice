@@ -73,6 +73,7 @@ mod migrate_nfs_db;
 mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
+mod remote_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
@@ -85,6 +86,8 @@ use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::queue_cmd::QueueCommand;
+use crate::remote_cmd::RemoteCommand;
+use crate::remote_cmd::RemoteSubcommand;
 use crate::remote_control_cmd::RemoteControlCommand;
 use codex_exec_server_cli::ExecServerCommand;
 use doctor::DoctorCommand;
@@ -180,6 +183,9 @@ enum Subcommand {
 
     /// [experimental] Manage the app-server daemon with remote control enabled.
     RemoteControl(RemoteControlCommand),
+
+    /// [experimental] Find your machines on Tailscale and attach to Codex on one over SSH.
+    Remote(RemoteCommand),
 
     /// Launch the Desktop app (opens the app installer if missing).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -988,7 +994,8 @@ struct FeatureToggles {
 struct InteractiveRemoteOptions {
     /// Connect the TUI to a remote app server endpoint.
     ///
-    /// Accepted forms: `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`.
+    /// Accepted forms: `ws://host:port`, `wss://host:port`, `unix://`, `unix://PATH`, or
+    /// `ssh://[user@]host[:port]` (runs `codex app-server proxy` on the host over SSH).
     #[arg(long = "remote", value_name = "ADDR")]
     remote: Option<String>,
 
@@ -1557,6 +1564,30 @@ async fn dispatch_cli(
                 }
                 Some(AppServerSubcommand::GenerateInternalJsonSchema(gen_cli)) => {
                     codex_app_server_protocol::generate_internal_json_schema(&gen_cli.out_dir)?;
+                }
+            }
+        }
+        Some(Subcommand::Remote(remote_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "remote",
+            )?;
+            match remote_cli.subcommand {
+                RemoteSubcommand::List(args) => remote_cmd::run_list(args).await?,
+                RemoteSubcommand::Attach(args) => {
+                    let address = remote_cmd::attach_address(args).await?;
+                    prepend_config_flags(
+                        &mut interactive.config_overrides,
+                        root_config_overrides.clone(),
+                    );
+                    // Same path as `codex --remote ssh://HOST`.
+                    return Ok(Some(launch_tui(
+                        interactive,
+                        Some(address),
+                        /*remote_auth_token_env*/ None,
+                        arg0_paths,
+                    )));
                 }
             }
         }
@@ -2448,6 +2479,7 @@ fn unsupported_subcommand_name_for_strict_config(
             Some(app_server_subcommand_name(app_server.subcommand.as_ref()))
         }
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
+        Some(Subcommand::Remote(_)) => Some("remote"),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),

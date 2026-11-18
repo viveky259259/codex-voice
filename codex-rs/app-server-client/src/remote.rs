@@ -4,7 +4,8 @@ This module implements the remote app-server client transport.
 It owns the remote connection lifecycle, including the initialize/initialized
 handshake, JSON-RPC request/response routing, server-request resolution, and
 notification streaming. Remote connections always carry WebSocket frames, over
-either TCP WebSocket URLs or local Unix sockets. The rest of the crate uses the
+TCP WebSocket URLs, local Unix sockets, or the stdio of an `ssh` child running
+`codex app-server proxy`. The rest of the crate uses the
 same `AppServerEvent` surface for both in-process and remote transports, so
 callers such as the TUI can switch between them without changing their
 higher-level session logic.
@@ -24,6 +25,7 @@ use crate::TypedRequestError;
 use crate::decode_typed_response;
 use crate::remote_websocket::RemoteWebSocket;
 use crate::remote_websocket::WebSocketHandshake;
+use crate::ssh::SshTarget;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
@@ -69,7 +71,7 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 // Tungstenite still needs an HTTP request URI for the WebSocket handshake;
 // the bytes travel over the Unix socket, not TCP.
-const UDS_WEBSOCKET_HANDSHAKE_URL: &str = "ws://localhost/rpc";
+pub(crate) const UDS_WEBSOCKET_HANDSHAKE_URL: &str = "ws://localhost/rpc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteAppServerEndpoint {
@@ -79,6 +81,11 @@ pub enum RemoteAppServerEndpoint {
     },
     UnixSocket {
         socket_path: AbsolutePathBuf,
+    },
+    /// Runs `codex app-server proxy` on a host over SSH and speaks WebSocket
+    /// over the ssh child's stdio. SSH authenticates; no bearer token is sent.
+    Ssh {
+        target: SshTarget,
     },
 }
 
@@ -219,6 +226,11 @@ impl RemoteAppServerClient {
             RemoteAppServerEndpoint::UnixSocket { socket_path } => {
                 let (endpoint, stream) =
                     connect_unix_socket_endpoint(socket_path, peer_policy).await?;
+                Self::connect_with_stream(channel_capacity, endpoint, stream, initialize_params)
+                    .await
+            }
+            RemoteAppServerEndpoint::Ssh { target } => {
+                let (endpoint, stream) = crate::ssh::connect_ssh_endpoint(&target).await?;
                 Self::connect_with_stream(channel_capacity, endpoint, stream, initialize_params)
                     .await
             }
@@ -834,7 +846,7 @@ async fn connect_unix_socket_endpoint(
     Ok((endpoint, stream))
 }
 
-fn websocket_request(url: &str) -> Result<Request, TungsteniteError> {
+pub(crate) fn websocket_request(url: &str) -> Result<Request, TungsteniteError> {
     let mut request = url.into_client_request()?;
     request.headers_mut().insert(
         WEBSOCKET_COMPRESSION_HEADER,
@@ -843,7 +855,7 @@ fn websocket_request(url: &str) -> Result<Request, TungsteniteError> {
     Ok(request)
 }
 
-fn remote_websocket_config() -> WebSocketConfig {
+pub(crate) fn remote_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_frame_size(Some(REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE))
         .max_message_size(Some(REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE))

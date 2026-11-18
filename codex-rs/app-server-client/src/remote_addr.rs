@@ -1,6 +1,7 @@
 //! Parse CLI remote app-server endpoints and determine whether they can carry bearer tokens.
 
 use crate::RemoteAppServerEndpoint;
+use crate::SshTarget;
 use crate::remote::websocket_url_supports_auth_token;
 use codex_core::config::find_codex_home;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -47,12 +48,16 @@ pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndp
         };
         return Ok(RemoteAppServerEndpoint::UnixSocket { socket_path });
     }
+    if addr.starts_with("ssh://") {
+        let target = SshTarget::parse_url(addr).map_err(|err| color_eyre::eyre::eyre!(err))?;
+        return Ok(RemoteAppServerEndpoint::Ssh { target });
+    }
 
     let parsed = match Url::parse(addr) {
         Ok(parsed) => parsed,
         Err(_) => {
             color_eyre::eyre::bail!(
-                "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+                "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, `unix://PATH`, or `ssh://[user@]host[:port]`"
             );
         }
     };
@@ -70,7 +75,7 @@ pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndp
     }
 
     color_eyre::eyre::bail!(
-        "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+        "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, `unix://PATH`, or `ssh://[user@]host[:port]`"
     );
 }
 
@@ -97,6 +102,11 @@ pub fn resolve_remote_endpoint(
                 .is_ok_and(|parsed| websocket_url_supports_auth_token(&parsed)) =>
             {
                 auth_token
+            }
+            RemoteAppServerEndpoint::Ssh { .. } => {
+                return Err(std::io::Error::other(
+                    "`--remote-auth-token-env` cannot be used with `ssh://` remotes; SSH authenticates the connection and no bearer token is sent.",
+                ));
             }
             RemoteAppServerEndpoint::WebSocket { .. }
             | RemoteAppServerEndpoint::UnixSocket { .. } => {
