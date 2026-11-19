@@ -21,9 +21,12 @@ use crate::config::LocalVoiceConfig;
 use crate::config::TranscriptFilterConfig;
 use crate::error::VoiceError;
 use crate::error::VoiceStage;
+use crate::model_vad::DetectorPlan;
+use crate::model_vad::Host;
+use crate::model_vad::ModelVadConfig;
 use crate::model_vad::ProbabilityVad;
-use crate::model_vad::VadBackend;
 use crate::model_vad::VadModel;
+use crate::model_vad::plan;
 use crate::process::run_cancellable;
 use crate::stt::SpeechToText;
 use crate::stt::build_stt;
@@ -542,10 +545,29 @@ struct ModelDetector {
 
 impl Detector {
     async fn start(config: &VadConfig) -> crate::Result<Self> {
-        match config.backend {
-            VadBackend::Energy => Ok(Self::Energy(Box::new(Vad::new(config.clone())))),
-            VadBackend::Model => {
-                let model = VadModel::spawn(&config.model).await?;
+        let energy = || Self::Energy(Box::new(Vad::new(config.clone())));
+        match plan(config, &Host::current())? {
+            DetectorPlan::Energy => Ok(energy()),
+            DetectorPlan::Model {
+                command,
+                fallback_to_energy,
+                startup_timeout_ms,
+            } => {
+                let model_config = ModelVadConfig {
+                    command,
+                    startup_timeout_ms,
+                    ..config.model.clone()
+                };
+                let model = match VadModel::spawn(&model_config).await {
+                    Ok(model) => model,
+                    Err(err) if fallback_to_energy => {
+                        tracing::warn!(
+                            "speech detection model unavailable, using the energy detector: {err}"
+                        );
+                        return Ok(energy());
+                    }
+                    Err(err) => return Err(err),
+                };
                 tracing::debug!(pid = ?model.pid(), "vad: model helper ready");
                 Ok(Self::Model(Box::new(ModelDetector {
                     model,

@@ -174,7 +174,7 @@ start_probability = 0.6
             ..ModelVadConfig::default()
         }
     );
-    assert_eq!(VadConfig::default().backend, VadBackend::Energy);
+    assert_eq!(VadConfig::default().backend, VadBackend::Auto);
 }
 
 /// A stand-in helper: `ready`, then 1.000 for frames whose first sample is
@@ -260,4 +260,121 @@ async fn a_helper_that_never_gets_ready_times_out() {
         panic!("expected an error");
     };
     assert!(matches!(err, VoiceError::Timeout(200)), "{err}");
+}
+
+fn host(macos: bool, uv: bool, dir: &std::path::Path) -> Host {
+    Host {
+        macos,
+        uv: uv.then(|| std::path::PathBuf::from("/opt/test/uv")),
+        cache_dir: Some(dir.to_path_buf()),
+    }
+}
+
+fn with_backend(backend: VadBackend) -> VadConfig {
+    VadConfig {
+        backend,
+        ..VadConfig::default()
+    }
+}
+
+fn bundled(dir: &std::path::Path) -> Vec<String> {
+    vec![
+        "/opt/test/uv".to_string(),
+        "run".to_string(),
+        "--quiet".to_string(),
+        "--script".to_string(),
+        dir.join("silero_vad.py").to_string_lossy().into_owned(),
+    ]
+}
+
+#[test]
+fn auto_uses_the_bundled_model_on_macos_with_uv() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = plan(
+        &with_backend(VadBackend::Auto),
+        &host(true, true, dir.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        plan,
+        DetectorPlan::Model {
+            command: bundled(dir.path()),
+            fallback_to_energy: true,
+            startup_timeout_ms: 60_000,
+        }
+    );
+    // The helper was written next to where it keeps the model.
+    let written = std::fs::read_to_string(dir.path().join("silero_vad.py")).unwrap();
+    assert!(written.contains("Silero VAD v5"));
+}
+
+#[test]
+fn auto_uses_energy_without_uv_or_off_macos() {
+    let dir = tempfile::tempdir().unwrap();
+    let auto = with_backend(VadBackend::Auto);
+    assert_eq!(
+        plan(&auto, &host(true, false, dir.path())).unwrap(),
+        DetectorPlan::Energy
+    );
+    assert_eq!(
+        plan(&auto, &host(false, true, dir.path())).unwrap(),
+        DetectorPlan::Energy
+    );
+    assert!(!dir.path().join("silero_vad.py").exists());
+}
+
+#[test]
+fn auto_with_a_configured_command_uses_it_anywhere_with_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = with_backend(VadBackend::Auto);
+    config.model.command = vec!["my-vad".to_string()];
+    assert_eq!(
+        plan(&config, &host(false, false, dir.path())).unwrap(),
+        DetectorPlan::Model {
+            command: vec!["my-vad".to_string()],
+            fallback_to_energy: true,
+            startup_timeout_ms: 60_000,
+        }
+    );
+}
+
+#[test]
+fn model_is_strict_and_energy_is_energy() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = with_backend(VadBackend::Model);
+    assert_eq!(
+        plan(&model, &host(false, true, dir.path())).unwrap(),
+        DetectorPlan::Model {
+            command: bundled(dir.path()),
+            fallback_to_energy: false,
+            startup_timeout_ms: 120_000,
+        }
+    );
+    let Err(err) = plan(&model, &host(true, false, dir.path())) else {
+        panic!("model without uv or a command must fail");
+    };
+    assert!(err.to_string().contains("uv"), "{err}");
+    assert_eq!(
+        plan(
+            &with_backend(VadBackend::Energy),
+            &host(true, true, dir.path())
+        )
+        .unwrap(),
+        DetectorPlan::Energy
+    );
+}
+
+#[test]
+fn the_bundled_helper_is_rewritten_only_when_it_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_bundled_helper(dir.path()).unwrap();
+    std::fs::write(&path, "stale").unwrap();
+    write_bundled_helper(dir.path()).unwrap();
+    assert_ne!(std::fs::read_to_string(&path).unwrap(), "stale");
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    write_bundled_helper(dir.path()).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
 }

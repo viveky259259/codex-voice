@@ -37,23 +37,196 @@ use crate::vad::Utterance;
 use crate::vad::VadConfig;
 use crate::vad::VadEvent;
 
+/// The bundled helper, written to the cache directory on first use so an
+/// installed binary needs no repository checkout.
+const BUNDLED_HELPER: &str = include_str!("../helpers/silero_vad.py");
+const BUNDLED_HELPER_NAME: &str = "silero_vad.py";
+/// `auto` gives up on the model after this long and uses the energy
+/// detector, so a first run that installs dependencies can't stall voice.
+const AUTO_STARTUP_TIMEOUT_MS: u64 = 60_000;
+
 /// Which detector decides where utterances start and end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VadBackend {
-    /// Energy over an adaptive noise floor (no extra dependencies).
+    /// The model on macOS when `uv` is installed, otherwise energy. If the
+    /// model can't start (offline first run, timeout), falls back to energy
+    /// with a warning instead of failing.
     #[default]
+    Auto,
+    /// Energy over an adaptive noise floor (no extra dependencies).
     Energy,
     /// Speech probabilities from a local model helper (`[vad.model]`).
+    /// Fails, rather than falling back, if the helper can't start.
     Model,
+}
+
+/// What [`plan`] decided to run.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DetectorPlan {
+    Energy,
+    Model {
+        command: Vec<String>,
+        /// On a start failure, use the energy detector instead of failing.
+        fallback_to_energy: bool,
+        startup_timeout_ms: u64,
+    },
+}
+
+/// The host facts [`plan`] depends on, injected so every branch is testable.
+#[derive(Clone, Debug)]
+pub struct Host {
+    pub macos: bool,
+    /// `uv`, if found.
+    pub uv: Option<std::path::PathBuf>,
+    /// Where the bundled helper is written.
+    pub cache_dir: Option<std::path::PathBuf>,
+}
+
+impl Host {
+    pub fn current() -> Self {
+        Self {
+            macos: cfg!(target_os = "macos"),
+            uv: find_uv(),
+            cache_dir: cache_dir(),
+        }
+    }
+}
+
+/// Picks the detector for `config` on `host`.
+pub fn plan(config: &VadConfig, host: &Host) -> Result<DetectorPlan> {
+    let model = &config.model;
+    match config.backend {
+        VadBackend::Energy => Ok(DetectorPlan::Energy),
+        VadBackend::Model => Ok(DetectorPlan::Model {
+            command: match model.command.is_empty() {
+                false => model.command.clone(),
+                true => bundled_command(host)?,
+            },
+            fallback_to_energy: false,
+            startup_timeout_ms: model.startup_timeout_ms,
+        }),
+        VadBackend::Auto => {
+            if !model.command.is_empty() {
+                return Ok(DetectorPlan::Model {
+                    command: model.command.clone(),
+                    fallback_to_energy: true,
+                    startup_timeout_ms: model.startup_timeout_ms.min(AUTO_STARTUP_TIMEOUT_MS),
+                });
+            }
+            if !host.macos {
+                return Ok(DetectorPlan::Energy);
+            }
+            match bundled_command(host) {
+                Ok(command) => Ok(DetectorPlan::Model {
+                    command,
+                    fallback_to_energy: true,
+                    startup_timeout_ms: model.startup_timeout_ms.min(AUTO_STARTUP_TIMEOUT_MS),
+                }),
+                Err(err) => {
+                    tracing::info!("vad: using the energy detector ({err})");
+                    Ok(DetectorPlan::Energy)
+                }
+            }
+        }
+    }
+}
+
+/// `uv run --quiet --script <cache>/silero_vad.py`, writing the bundled
+/// helper there if it is missing or out of date.
+fn bundled_command(host: &Host) -> Result<Vec<String>> {
+    let Some(uv) = &host.uv else {
+        return Err(VoiceError::Config(
+            "the speech detection model needs `uv` (https://docs.astral.sh/uv/), or set [vad.model] command"
+                .to_string(),
+        ));
+    };
+    let Some(dir) = &host.cache_dir else {
+        return Err(VoiceError::Config(
+            "no cache directory for the speech detection helper (set $CODEX_VOICE_MODELS)"
+                .to_string(),
+        ));
+    };
+    let helper = write_bundled_helper(dir)?;
+    Ok(vec![
+        uv.to_string_lossy().into_owned(),
+        "run".to_string(),
+        "--quiet".to_string(),
+        "--script".to_string(),
+        helper.to_string_lossy().into_owned(),
+    ])
+}
+
+/// Writes the bundled helper into `dir` unless an identical copy is there.
+pub fn write_bundled_helper(dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let path = dir.join(BUNDLED_HELPER_NAME);
+    if std::fs::read_to_string(&path).is_ok_and(|current| current == BUNDLED_HELPER) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(dir)?;
+    let partial = dir.join(format!("{BUNDLED_HELPER_NAME}.{}.part", std::process::id()));
+    std::fs::write(&partial, BUNDLED_HELPER)?;
+    std::fs::rename(&partial, &path)?;
+    Ok(path)
+}
+
+/// `$CODEX_VOICE_MODELS`, else `~/.cache/codex-voice` (where the helper also
+/// keeps the model).
+fn cache_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("CODEX_VOICE_MODELS").filter(|dir| !dir.is_empty()) {
+        return Some(dir.into());
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".cache")
+                .join("codex-voice")
+        })
+}
+
+/// `uv` on `PATH`, else its usual install locations (a GUI-launched terminal
+/// may have a short `PATH`).
+fn find_uv() -> Option<std::path::PathBuf> {
+    let on_path = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join("uv"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let usual = [
+        Some(std::path::PathBuf::from("/opt/homebrew/bin/uv")),
+        Some(std::path::PathBuf::from("/usr/local/bin/uv")),
+        home.as_ref().map(|home| home.join(".local/bin/uv")),
+        home.as_ref().map(|home| home.join(".cargo/bin/uv")),
+    ];
+    on_path
+        .into_iter()
+        .chain(usual.into_iter().flatten())
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelVadConfig {
-    /// The helper, as argv (never through a shell). Required for
-    /// `backend = "model"`, e.g.
-    /// `["uv", "run", "--quiet", "--script", "/path/to/helpers/silero_vad.py"]`.
+    /// The helper, as argv (never through a shell). Empty (the default) runs
+    /// the bundled Silero helper with `uv`:
+    /// `["uv", "run", "--quiet", "--script", "<cache>/silero_vad.py"]`.
     pub command: Vec<String>,
     /// Samples per frame the helper expects (Silero v5 at 16 kHz: 512).
     pub frame_samples: usize,
@@ -259,8 +432,7 @@ impl VadModel {
     pub async fn spawn(config: &ModelVadConfig) -> Result<Self> {
         if config.command.is_empty() {
             return Err(VoiceError::Config(
-                "[vad] backend = \"model\" needs [vad.model] command, e.g. \
-                 [\"uv\", \"run\", \"--quiet\", \"--script\", \"<repo>/codex-rs/local-voice/helpers/silero_vad.py\"]"
+                "no speech detection helper command (see [vad.model] command, or install uv to use the bundled silero_vad.py)"
                     .to_string(),
             ));
         }

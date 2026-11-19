@@ -100,6 +100,11 @@ fn config(capture: CaptureConfig, stt: SttConfig, tts: TtsConfig) -> LocalVoiceC
         capture,
         stt,
         tts,
+        // The default (`auto`) would start the real model helper on macOS.
+        vad: crate::vad::VadConfig {
+            backend: crate::model_vad::VadBackend::Energy,
+            ..crate::vad::VadConfig::default()
+        },
         ..LocalVoiceConfig::default()
     }
 }
