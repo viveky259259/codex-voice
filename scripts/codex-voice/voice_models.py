@@ -114,7 +114,7 @@ def main():
             print()
 
     voices = kokoro_voices()
-    print("Kokoro voices cached (tts_voice = <name>):")
+    print("Kokoro voices cached (tts = kokoro or local-models, tts_voice = <name>):")
     print("  " + (", ".join(voices) if voices else "none"))
     print()
     names = say_voices()

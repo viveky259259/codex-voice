@@ -18,6 +18,7 @@ set -eu
 CV="${CODEX_VOICE_HOME:-$HOME/.codex-voice}"
 BIN="$CV/bin/codex"
 PORT="${CODEX_VOICE_WHISPER_PORT:-8178}"
+KOKORO_PORT="${CODEX_VOICE_KOKORO_PORT:-8880}"
 export CODEX_HOME="$CV"
 # A GUI-launched terminal may miss these; the voice tools live here.
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
@@ -100,34 +101,53 @@ gateway_id() {
 job='job={tool="get_job",arguments={job_id="{job_id}"},poll_interval_ms=250,timeout_ms=180000}'
 mlx_whisper_stt="realtime.local.stt={backend=\"command\",command=[\"mlx_whisper\",\"{wav}\",\"--model\",\"$stt_model\",\"--language\",\"$language\",\"--output-format\",\"txt\",\"--output-dir\",\"{outdir}\",\"--verbose\",\"False\"],timeout_ms=60000}"
 
-healthy() {
-  curl -fsS -m 1 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
+up() {
+  curl -fsS -m 1 "http://127.0.0.1:$1/health" >/dev/null 2>&1
 }
 
+# start_helper NAME PORT TRIES ARGS...: start helpers/NAME.py on PORT unless
+# something already answers there, and wait up to TRIES half-seconds for it.
+# The helpers this run started are stopped when it exits.
+started=""
+start_helper() {
+  name=$1 port=$2 tries=$3
+  shift 3
+  if up "$port"; then return 0; fi
+  command -v uv >/dev/null 2>&1 || return 1
+  uv run --quiet --script "$CV/helpers/$name.py" --port "$port" "$@" \
+    >>"$CV/log/$name.log" 2>&1 &
+  pid=$!
+  started="$started $name:$port:$pid"
+  i=0
+  while [ "$i" -lt "$tries" ] && ! up "$port"; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+    i=$((i + 1))
+  done
+  up "$port"
+}
+
+# shellcheck disable=SC2329 # called by the trap
+stop_helpers() {
+  for entry in $started; do
+    name=${entry%%:*}
+    rest=${entry#*:}
+    kill "${rest#*:}" 2>/dev/null || true
+    pkill -f "$name.py --port ${rest%%:*}" 2>/dev/null || true
+  done
+}
+trap stop_helpers EXIT INT TERM
+
 # Speech to text.
-server_pid=""
 stt_override=""
 case "$stt" in
   whisper-server)
     # Keep Whisper loaded for this session: 3-4x faster than mlx_whisper.
-    if [ "${CODEX_VOICE_WHISPER_SERVER:-1}" = 1 ] && command -v uv >/dev/null 2>&1; then
-      if ! healthy; then
-        uv run --quiet --script "$CV/helpers/whisper_server.py" --port "$PORT" \
-          --model "$stt_model" --language "$language" \
-          >>"$CV/log/whisper-server.log" 2>&1 &
-        server_pid=$!
-        i=0
-        while [ $i -lt 30 ] && ! healthy; do
-          if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
-          sleep 0.5
-          i=$((i + 1))
-        done
-      fi
-    fi
-    if healthy; then
+    if [ "${CODEX_VOICE_WHISPER_SERVER:-1}" = 1 ] &&
+      start_helper whisper_server "$PORT" 30 --model "$stt_model" --language "$language"; then
       stt_override="realtime.local.stt={backend=\"openai_compatible\",base_url=\"http://127.0.0.1:$PORT\",language=\"$language\"}"
     else
-      warn "Whisper server not ready; using the slower mlx_whisper command (log: $CV/log/whisper-server.log)"
+      warn "Whisper server not ready; using the slower mlx_whisper command (log: $CV/log/whisper_server.log)"
       stt_override="$mlx_whisper_stt"
     fi
     ;;
@@ -156,6 +176,14 @@ case "$tts" in
       tts_override="realtime.local.tts={backend=\"command\",command=[\"say\",\"-v\",\"$say_voice\",\"{text}\"]}"
     fi
     ;;
+  kokoro)
+    # Kokoro kept loaded for this session: a sentence in well under a second.
+    if start_helper kokoro_server "$KOKORO_PORT" 60 --model "${tts_model#hf:}" --voice "$tts_voice"; then
+      tts_override="realtime.local.tts={backend=\"openai_compatible\",base_url=\"http://127.0.0.1:$KOKORO_PORT\",model=\"kokoro\",voice=\"$tts_voice\"}"
+    else
+      warn "Kokoro server not ready; speaking with say (log: $CV/log/kokoro_server.log)"
+    fi
+    ;;
   local-models)
     if gateway_up; then
       tts_override="realtime.local.tts={backend=\"mcp\",url=\"$mcp_url\",tool=\"submit_inference\",arguments={model_id=\"$(gateway_id "$tts_model")\",prompt=\"{text}\",options={voice=\"$tts_voice\",language=\"$language\"}},$job}"
@@ -164,19 +192,10 @@ case "$tts" in
     fi
     ;;
   *)
-    warn "unknown tts '$tts' in voice.conf (say or local-models)"
+    warn "unknown tts '$tts' in voice.conf (say, kokoro or local-models)"
     exit 1
     ;;
 esac
-
-# shellcheck disable=SC2329 # called by the trap
-stop_server() {
-  if [ -n "$server_pid" ]; then
-    kill "$server_pid" 2>/dev/null || true
-    pkill -f "whisper_server.py --port $PORT" 2>/dev/null || true
-  fi
-}
-trap stop_server EXIT INT TERM
 
 agent=claude-code
 for arg in "$@"; do

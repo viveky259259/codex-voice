@@ -125,7 +125,11 @@ command = ["say", "-o", "{wav}", "--data-format=LEI16@22050", "{text}"]
 player = ["afplay", "{wav}"]
 ```
 
-For Kokoro through kokoro-fastapi (port 8880), use this `[tts]` instead:
+For Kokoro on Apple silicon, `helpers/kokoro_server.py` keeps the model loaded
+and serves the same API on port 8880, generating a sentence in about 0.1 s:
+`uv run --script helpers/kokoro_server.py [--voice af_heart]`. Kokoro through
+kokoro-fastapi (also port 8880) works the same way. Either way, use this
+`[tts]`:
 
 ```toml
 [tts]

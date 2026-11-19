@@ -72,6 +72,7 @@ install_file "$RELEASE/codex" "$CV/bin/codex" 755
 install_file "$RELEASE/codex-local-voice" "$CV/bin/codex-local-voice" 755
 install_file "$REPO/codex-rs/local-voice/helpers/whisper_server.py" "$CV/helpers/whisper_server.py" 644
 install_file "$REPO/codex-rs/local-voice/helpers/silero_vad.py" "$CV/helpers/silero_vad.py" 644
+install_file "$REPO/codex-rs/local-voice/helpers/kokoro_server.py" "$CV/helpers/kokoro_server.py" 644
 install_file "$HERE/voice_models.py" "$CV/helpers/voice_models.py" 644
 install_file "$HERE/codex-voice" "$BIN_DIR/codex-voice" 755
 
@@ -87,6 +88,16 @@ if [ -f "$CV/voice.conf" ]; then
 else
   install_file "$HERE/voice.conf" "$CV/voice.conf" 644
   echo "Wrote $CV/voice.conf"
+fi
+
+# Install the helpers' Python packages now, so the first session starts fast.
+if command -v uv >/dev/null 2>&1 && [ "${CODEX_VOICE_SKIP_HELPERS:-0}" != 1 ]; then
+  for helper in whisper_server kokoro_server; do
+    echo "Preparing the $helper packages..."
+    if ! uv run --quiet --script "$CV/helpers/$helper.py" --help >/dev/null 2>&1; then
+      echo "  couldn't prepare $helper now; it is retried at the first start"
+    fi
+  done
 fi
 
 echo "Installed codex-voice: $BIN_DIR/codex-voice"

@@ -55,7 +55,8 @@ codex-voice models       # voice models and voices on this Mac
 ```
 
 The launcher keeps a Whisper server loaded for the session, which makes
-transcripts 3-4x faster. It stops the server when you quit.
+transcripts 3-4x faster. With `tts = kokoro` it also keeps Kokoro loaded. It
+stops both servers when you quit.
 
 ### Choosing voice models
 
@@ -63,13 +64,21 @@ Pick the speech models in `~/.codex-voice/voice.conf`:
 
 | Setting | Values |
 |---|---|
-| `tts` | `say` (default) or `local-models` |
+| `tts` | `say` (default), `kokoro` or `local-models` |
 | `say_voice` | a macOS voice (`say -v '?'`); empty for the system voice |
-| `tts_model`, `tts_voice` | a speech model and voice from the local-models gateway, e.g. `hf:mlx-community/Kokoro-82M-8bit` and `af_heart` |
+| `tts_model`, `tts_voice` | the speech model and voice for `kokoro` and `local-models`, e.g. `hf:mlx-community/Kokoro-82M-8bit` and `af_heart` |
 | `stt` | `whisper-server` (default), `mlx_whisper` or `local-models` |
 | `stt_model` | the Whisper model, e.g. `mlx-community/whisper-small-mlx` |
 | `language` | `en` |
 | `mcp_url` | the gateway, `http://127.0.0.1:5051/mcp` |
+
+`kokoro` runs `helpers/kokoro_server.py`, which keeps Kokoro loaded through
+mlx-audio and serves `/v1/audio/speech` on port 8880. A two-sentence answer
+(about 10 s of speech) takes about 0.5 s to generate. The first start
+downloads the packages and the model; the installer prepares the packages.
+Voice names start with their language: `af_`/`am_` American English, `bf_`/`bm_`
+British, `hf_`/`hm_` Hindi. If the server can't start, the launcher speaks with
+`say` and says so.
 
 `local-models` is the MCP gateway in local-agents (`uv run mcp_server.py
 --transport streamable-http`), which serves Kokoro, Chatterbox and other
