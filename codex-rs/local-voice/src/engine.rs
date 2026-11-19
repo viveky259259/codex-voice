@@ -21,6 +21,9 @@ use crate::config::LocalVoiceConfig;
 use crate::config::TranscriptFilterConfig;
 use crate::error::VoiceError;
 use crate::error::VoiceStage;
+use crate::model_vad::ProbabilityVad;
+use crate::model_vad::VadBackend;
+use crate::model_vad::VadModel;
 use crate::process::run_cancellable;
 use crate::stt::SpeechToText;
 use crate::stt::build_stt;
@@ -34,6 +37,7 @@ use crate::vad::BargeInDetector;
 use crate::vad::SAMPLE_RATE;
 use crate::vad::Utterance;
 use crate::vad::Vad;
+use crate::vad::VadConfig;
 use crate::vad::VadEvent;
 use crate::wav::write_wav;
 
@@ -406,9 +410,22 @@ async fn audio_loop(
     shared
         .capture_pid
         .store(capture.pid().unwrap_or(0), Ordering::SeqCst);
+    let mut vad = match Detector::start(&config.vad).await {
+        Ok(vad) => vad,
+        Err(err) => {
+            capture.stop().await;
+            shared.capture_pid.store(0, Ordering::SeqCst);
+            shared
+                .error(
+                    VoiceStage::Capture,
+                    format!("speech detection model: {err}"),
+                )
+                .await;
+            return;
+        }
+    };
     shared.emit(LocalVoiceEvent::Listening).await;
 
-    let mut vad = Vad::new(config.vad.clone());
     let mut barge_in = BargeInDetector::new(
         config.playback.barge_in_threshold_db,
         config.playback.barge_in_min_ms,
@@ -419,6 +436,7 @@ async fn audio_loop(
             biased;
             () = wait_for_shutdown(&mut shutdown) => {
                 capture.stop().await;
+                vad.stop().await;
                 shared.capture_pid.store(0, Ordering::SeqCst);
                 return;
             }
@@ -428,6 +446,7 @@ async fn audio_loop(
             for event in vad.flush() {
                 handle_vad_event(&shared, &utterances, event).await;
             }
+            vad.stop().await;
             let exit = capture.exit().await;
             shared.capture_pid.store(0, Ordering::SeqCst);
             match exit {
@@ -454,8 +473,8 @@ async fn audio_loop(
                     shared.stop_speaking();
                     vad.reset();
                     vad.end_calibration();
-                    for event in vad.push(&audio) {
-                        handle_vad_event(&shared, &utterances, event).await;
+                    if !push_detector(&shared, &utterances, &mut vad, &mut capture, &audio).await {
+                        return;
                     }
                 }
                 continue;
@@ -468,9 +487,150 @@ async fn audio_loop(
             }
             Echo::Open => {}
         }
-        for event in vad.push(&samples) {
-            handle_vad_event(&shared, &utterances, event).await;
+        if !push_detector(&shared, &utterances, &mut vad, &mut capture, &samples).await {
+            return;
         }
+    }
+}
+
+/// Feeds samples to the detector. On a model failure, reports it, stops
+/// capture and returns `false`.
+async fn push_detector(
+    shared: &Arc<Shared>,
+    utterances: &mpsc::UnboundedSender<Utterance>,
+    vad: &mut Detector,
+    capture: &mut Capture,
+    samples: &[i16],
+) -> bool {
+    match vad.push(samples).await {
+        Ok(events) => {
+            for event in events {
+                handle_vad_event(shared, utterances, event).await;
+            }
+            true
+        }
+        Err(err) => {
+            capture.stop().await;
+            vad.stop().await;
+            shared.capture_pid.store(0, Ordering::SeqCst);
+            shared
+                .error(
+                    VoiceStage::Capture,
+                    format!("speech detection model: {err}"),
+                )
+                .await;
+            false
+        }
+    }
+}
+
+/// The configured speech detector.
+enum Detector {
+    Energy(Box<Vad>),
+    Model(Box<ModelDetector>),
+}
+
+/// With `backend = "model"` the energy detector still runs beside the model,
+/// only to keep the noise floor that barge-in compares against; its events
+/// are ignored.
+struct ModelDetector {
+    model: VadModel,
+    vad: ProbabilityVad,
+    floor: Vad,
+    pending: Vec<i16>,
+}
+
+impl Detector {
+    async fn start(config: &VadConfig) -> crate::Result<Self> {
+        match config.backend {
+            VadBackend::Energy => Ok(Self::Energy(Box::new(Vad::new(config.clone())))),
+            VadBackend::Model => {
+                let model = VadModel::spawn(&config.model).await?;
+                tracing::debug!(pid = ?model.pid(), "vad: model helper ready");
+                Ok(Self::Model(Box::new(ModelDetector {
+                    model,
+                    vad: ProbabilityVad::new(config, &config.model),
+                    floor: Vad::new(config.clone()),
+                    pending: Vec::new(),
+                })))
+            }
+        }
+    }
+
+    /// The energy detector: the only one, or the one keeping the floor.
+    fn energy(&self) -> &Vad {
+        match self {
+            Self::Energy(vad) => vad,
+            Self::Model(model) => &model.floor,
+        }
+    }
+
+    fn frame_len(&self) -> usize {
+        self.energy().frame_len()
+    }
+
+    fn noise_floor(&self) -> f32 {
+        self.energy().noise_floor()
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Energy(vad) => vad.reset(),
+            Self::Model(model) => {
+                model.vad.reset();
+                model.floor.reset();
+                model.pending.clear();
+            }
+        }
+    }
+
+    fn end_calibration(&mut self) {
+        match self {
+            Self::Energy(vad) => vad.end_calibration(),
+            Self::Model(model) => model.floor.end_calibration(),
+        }
+    }
+
+    async fn push(&mut self, samples: &[i16]) -> crate::Result<Vec<VadEvent>> {
+        match self {
+            Self::Energy(vad) => Ok(vad.push(samples)),
+            Self::Model(model) => model.push(samples).await,
+        }
+    }
+
+    fn flush(&mut self) -> Vec<VadEvent> {
+        match self {
+            Self::Energy(vad) => vad.flush(),
+            Self::Model(model) => {
+                model.pending.clear();
+                model.vad.flush()
+            }
+        }
+    }
+
+    async fn stop(&mut self) {
+        if let Self::Model(model) = self {
+            model.model.stop().await;
+        }
+    }
+}
+
+impl ModelDetector {
+    async fn push(&mut self, samples: &[i16]) -> crate::Result<Vec<VadEvent>> {
+        let _ = self.floor.push(samples);
+        self.pending.extend_from_slice(samples);
+        let frame_len = self.vad.frame_len();
+        let mut events = Vec::new();
+        let mut offset = 0;
+        while self.pending.len() - offset >= frame_len {
+            let frame = &self.pending[offset..offset + frame_len];
+            let probability = self.model.probability(frame).await?;
+            tracing::trace!(probability, "vad model frame");
+            events.extend(self.vad.push_frame(frame, probability));
+            offset += frame_len;
+        }
+        self.pending.drain(..offset);
+        Ok(events)
     }
 }
 

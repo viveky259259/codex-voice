@@ -23,6 +23,12 @@ const FLOOR_RISE: f32 = 0.02;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VadConfig {
+    /// `energy` (this module) or `model` (speech probabilities from a local
+    /// model helper, see `model_vad`). `min_speech_ms`, `end_silence_ms`,
+    /// `max_utterance_ms` and `pre_roll_ms` apply to both.
+    pub backend: crate::model_vad::VadBackend,
+    /// Settings for `backend = "model"`.
+    pub model: crate::model_vad::ModelVadConfig,
     pub frame_ms: u32,
     /// A frame this far above the noise floor (dB) may start speech.
     pub start_threshold_db: f32,
@@ -62,6 +68,8 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
+            backend: crate::model_vad::VadBackend::default(),
+            model: crate::model_vad::ModelVadConfig::default(),
             frame_ms: 20,
             start_threshold_db: 12.0,
             continue_threshold_db: 6.0,

@@ -29,6 +29,10 @@ async fn main() {
         eprintln!("{message}");
         std::process::exit(1);
     }
+    // The engine has shut down and reaped its children. Exit now: returning
+    // would make the runtime wait for the blocking stdin read `listen` may
+    // still have pending, which only ends at EOF.
+    std::process::exit(0);
 }
 
 async fn run(args: Vec<String>) -> Result<(), String> {
@@ -96,7 +100,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
                         Ok(Some(line)) => voice.speak(line),
                         _ => break,
                     },
-                    _ = tokio::signal::ctrl_c() => break,
+                    () = shutdown_signal() => break,
                 }
             }
             voice.shutdown().await;
@@ -104,6 +108,25 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// Ctrl-C or, on Unix, SIGTERM: either shuts the engine down cleanly, so its
+/// capture, model and player processes (each in its own process group) stop
+/// too.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::SignalKind;
+        use tokio::signal::unix::signal;
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn parse_config(args: &[String]) -> Result<(LocalVoiceConfig, Vec<String>), String> {

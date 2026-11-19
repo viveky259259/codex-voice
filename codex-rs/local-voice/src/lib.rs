@@ -17,6 +17,7 @@ mod config;
 mod engine;
 mod error;
 pub mod mcp;
+pub mod model_vad;
 mod process;
 mod stt;
 mod template;

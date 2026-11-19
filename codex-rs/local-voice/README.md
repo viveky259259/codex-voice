@@ -12,10 +12,15 @@ speak(text) → local TTS → player            (mic muted while speaking + 400 
   runs as an argv array (never through a shell) in its own process group, and
   is killed with that group on shutdown or drop. If it dies, you get an
   `Error { stage: Capture }` event that ends with its stderr.
-- **VAD.** Energy based, with an adaptive noise floor (calibrated over the
-  first 200 ms). Settings: start and continue thresholds over the floor,
-  minimum speech length, end-of-utterance silence (700 ms), maximum length
-  (30 s) and pre-roll (300 ms).
+- **VAD.** Two backends. `energy` (the default): energy over an adaptive
+  noise floor (calibrated over the first 200 ms). Settings: start and
+  continue thresholds over the floor, minimum speech length,
+  end-of-utterance silence (700 ms), maximum length (30 s) and pre-roll
+  (300 ms). `model`: a local speech-detection model decides, frame by frame
+  (see "Model-based speech detection" below). It tells voice from hiss, fans
+  and hum, so steady background noise never starts an utterance and steady
+  speech is never cut off as noise. The length, silence and pre-roll settings
+  apply to both.
 - **Half duplex.** Mic audio is dropped while speaking and for
   `echo_tail_ms` afterwards. Barge-in is off by default. When it is on,
   sustained loud speech (24 dB over the floor for 300 ms) during playback
@@ -184,6 +189,45 @@ taken as final. The transcript is read from `text_path`, falling back to
 `audio_path`, falling back to common path fields, then to any string ending
 in `.wav`. The audio can be a file path, a `file://` URI or an `http(s)` URL,
 which is downloaded. Responses can be JSON or SSE.
+
+## Model-based speech detection
+
+`[vad] backend = "model"` runs a long-lived helper that returns a speech
+probability for each 32 ms frame. The bundled helper,
+[`helpers/silero_vad.py`](helpers/silero_vad.py), runs
+[Silero VAD v5](https://github.com/snakers4/silero-vad) (MIT, 2.3 MB) on
+onnxruntime. `uv run --script` installs onnxruntime and numpy in a cached
+environment on first use. The model is downloaded once to
+`~/.cache/codex-voice/silero_vad_v5.onnx` (override with
+`$CODEX_VOICE_MODELS`, or pass `--model PATH`) and its SHA-256 is checked.
+
+```toml
+[vad]
+backend = "model"
+end_silence_ms = 600   # a shorter tail than the energy default; the model doesn't need margin
+
+[vad.model]
+command = ["uv", "run", "--quiet", "--script", "/ABS/PATH/codex-rs/local-voice/helpers/silero_vad.py"]
+# start_probability = 0.5     # a frame at or above this may start speech
+# continue_probability = 0.35 # speech continues while frames stay at or above this
+# frame_samples = 512         # Silero v5 at 16 kHz
+# startup_timeout_ms = 120000 # the first run installs dependencies and downloads the model
+```
+
+In the TUI the same tables go under `[realtime.local.vad]` and
+`[realtime.local.vad.model]`.
+
+Any program can be the helper if it follows the protocol: read s16le mono
+16 kHz PCM on stdin in frames of `frame_samples`, write `ready` once on
+stdout, then one line per frame with a probability from 0.0 to 1.0. Barge-in
+still compares against the energy noise floor, which keeps running beside the
+model. If the helper fails to start or dies, listening stops with an
+`Error { stage: Capture }` whose message starts with
+`speech detection model:` and ends with the helper's stderr.
+
+Measured on an M-series Mac: under 1 ms per frame, ready about 1.5 s after
+start (once the environment is cached). White hiss at -28 dB scores at most
+0.06, and speech about 1.0.
 
 ## Other settings (defaults shown)
 
