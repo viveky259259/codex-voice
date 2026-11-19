@@ -1,0 +1,194 @@
+#!/bin/sh
+# codex-voice: the voice-first Codex fork with local voice. Installed by
+# scripts/codex-voice/install.sh into ~/.local/bin.
+#
+#   codex-voice                     Claude Code session with local voice
+#   codex-voice -m sonnet           pick the model
+#   codex-voice resume <id>         resume a Claude Code session
+#   codex-voice --agent codex       a Codex session instead (needs a model your login accepts)
+#   codex-voice models              list the voice models you can pick in voice.conf
+#
+# Settings live in ~/.codex-voice (not ~/.codex). Voice models are picked in
+# ~/.codex-voice/voice.conf; CODEX_VOICE_TTS, CODEX_VOICE_TTS_MODEL,
+# CODEX_VOICE_TTS_VOICE, CODEX_VOICE_SAY_VOICE, CODEX_VOICE_STT,
+# CODEX_VOICE_STT_MODEL and CODEX_VOICE_LANGUAGE override it for one run.
+# F8 or /voice toggles voice, F9 mutes.
+set -eu
+
+CV="${CODEX_VOICE_HOME:-$HOME/.codex-voice}"
+BIN="$CV/bin/codex"
+PORT="${CODEX_VOICE_WHISPER_PORT:-8178}"
+export CODEX_HOME="$CV"
+# A GUI-launched terminal may miss these; the voice tools live here.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+export PATH
+
+warn() {
+  echo "codex-voice: $*" >&2
+}
+
+# Voice settings: defaults, then voice.conf, then the environment.
+tts=say
+tts_model=hf:mlx-community/Kokoro-82M-8bit
+tts_voice=af_heart
+say_voice=
+stt=whisper-server
+stt_model=mlx-community/whisper-large-v3-turbo
+language=en
+mcp_url=http://127.0.0.1:5051/mcp
+
+if [ -f "$CV/voice.conf" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=$(printf '%s' "${line%%=*}" | tr -d ' \t')
+    # shellcheck disable=SC2034 # read by the eval below
+    val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    case "$key" in
+      tts | tts_model | tts_voice | say_voice | stt | stt_model | language | mcp_url)
+        eval "$key=\$val"
+        ;;
+      *) warn "$CV/voice.conf: unknown setting '$key'" ;;
+    esac
+  done <"$CV/voice.conf"
+fi
+
+tts="${CODEX_VOICE_TTS:-$tts}"
+tts_model="${CODEX_VOICE_TTS_MODEL:-$tts_model}"
+tts_voice="${CODEX_VOICE_TTS_VOICE:-$tts_voice}"
+say_voice="${CODEX_VOICE_SAY_VOICE:-$say_voice}"
+stt="${CODEX_VOICE_STT:-$stt}"
+stt_model="${CODEX_VOICE_STT_MODEL:-$stt_model}"
+language="${CODEX_VOICE_LANGUAGE:-$language}"
+mcp_url="${CODEX_VOICE_MCP_URL:-$mcp_url}"
+
+# Values are written into TOML strings below.
+# shellcheck disable=SC1003 # a literal backslash
+for v in "$tts_model" "$tts_voice" "$say_voice" "$stt_model" "$language" "$mcp_url"; do
+  case "$v" in
+    *'"'* | *'\'*)
+      warn "voice settings can't contain quotes or backslashes: $v"
+      exit 1
+      ;;
+  esac
+done
+
+if [ "${1:-}" = models ]; then
+  exec python3 -I "$CV/helpers/voice_models.py" "$mcp_url"
+fi
+
+if [ ! -x "$BIN" ]; then
+  warn "$BIN is missing; reinstall it"
+  exit 1
+fi
+
+gateway_up() {
+  curl -fsS -m 2 -o /dev/null -X POST "$mcp_url" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"codex-voice","version":"0"}}}' \
+    2>/dev/null
+}
+
+# Model ids in the local-models gateway carry a source prefix.
+gateway_id() {
+  case "$1" in
+    *:*) printf '%s' "$1" ;;
+    *) printf 'hf:%s' "$1" ;;
+  esac
+}
+
+job='job={tool="get_job",arguments={job_id="{job_id}"},poll_interval_ms=250,timeout_ms=180000}'
+mlx_whisper_stt="realtime.local.stt={backend=\"command\",command=[\"mlx_whisper\",\"{wav}\",\"--model\",\"$stt_model\",\"--language\",\"$language\",\"--output-format\",\"txt\",\"--output-dir\",\"{outdir}\",\"--verbose\",\"False\"],timeout_ms=60000}"
+
+healthy() {
+  curl -fsS -m 1 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
+}
+
+# Speech to text.
+server_pid=""
+stt_override=""
+case "$stt" in
+  whisper-server)
+    # Keep Whisper loaded for this session: 3-4x faster than mlx_whisper.
+    if [ "${CODEX_VOICE_WHISPER_SERVER:-1}" = 1 ] && command -v uv >/dev/null 2>&1; then
+      if ! healthy; then
+        uv run --quiet --script "$CV/helpers/whisper_server.py" --port "$PORT" \
+          --model "$stt_model" --language "$language" \
+          >>"$CV/log/whisper-server.log" 2>&1 &
+        server_pid=$!
+        i=0
+        while [ $i -lt 30 ] && ! healthy; do
+          if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
+          sleep 0.5
+          i=$((i + 1))
+        done
+      fi
+    fi
+    if healthy; then
+      stt_override="realtime.local.stt={backend=\"openai_compatible\",base_url=\"http://127.0.0.1:$PORT\",language=\"$language\"}"
+    else
+      warn "Whisper server not ready; using the slower mlx_whisper command (log: $CV/log/whisper-server.log)"
+      stt_override="$mlx_whisper_stt"
+    fi
+    ;;
+  mlx_whisper)
+    stt_override="$mlx_whisper_stt"
+    ;;
+  local-models)
+    if gateway_up; then
+      stt_override="realtime.local.stt={backend=\"mcp\",url=\"$mcp_url\",tool=\"submit_inference\",arguments={model_id=\"$(gateway_id "$stt_model")\",input_path=\"{wav}\",options={language=\"$language\"}},$job}"
+    else
+      warn "local-models gateway not reachable at $mcp_url; using the mlx_whisper command"
+      stt_override="$mlx_whisper_stt"
+    fi
+    ;;
+  *)
+    warn "unknown stt '$stt' in voice.conf (whisper-server, mlx_whisper or local-models)"
+    exit 1
+    ;;
+esac
+
+# Text to speech.
+tts_override=""
+case "$tts" in
+  say)
+    if [ -n "$say_voice" ]; then
+      tts_override="realtime.local.tts={backend=\"command\",command=[\"say\",\"-v\",\"$say_voice\",\"{text}\"]}"
+    fi
+    ;;
+  local-models)
+    if gateway_up; then
+      tts_override="realtime.local.tts={backend=\"mcp\",url=\"$mcp_url\",tool=\"submit_inference\",arguments={model_id=\"$(gateway_id "$tts_model")\",prompt=\"{text}\",options={voice=\"$tts_voice\",language=\"$language\"}},$job}"
+    else
+      warn "local-models gateway not reachable at $mcp_url; speaking with say"
+    fi
+    ;;
+  *)
+    warn "unknown tts '$tts' in voice.conf (say or local-models)"
+    exit 1
+    ;;
+esac
+
+# shellcheck disable=SC2329 # called by the trap
+stop_server() {
+  if [ -n "$server_pid" ]; then
+    kill "$server_pid" 2>/dev/null || true
+    pkill -f "whisper_server.py --port $PORT" 2>/dev/null || true
+  fi
+}
+trap stop_server EXIT INT TERM
+
+agent=claude-code
+for arg in "$@"; do
+  case "$arg" in
+    --agent | --agent=*) agent="" ;;
+  esac
+done
+
+if [ -n "$tts_override" ]; then set -- -c "$tts_override" "$@"; fi
+set -- -c "$stt_override" "$@"
+if [ -n "$agent" ]; then set -- --agent "$agent" "$@"; fi
+
+status=0
+"$BIN" --no-daemon "$@" || status=$?
+exit "$status"

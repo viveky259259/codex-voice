@@ -1,0 +1,18 @@
+# codex-voice settings (separate from ~/.codex). Launched by ~/.local/bin/codex-voice.
+# Voice models are picked in voice.conf next to this file.
+log_dir = "@CODEX_VOICE_HOME@/log"
+
+[realtime]
+# Local voice: mic -> speech detection model -> Whisper -> turn; answers spoken.
+backend = "local"
+auto_start = true
+voice_commands = true
+
+[tui]
+screen_reader_detection_done = true
+
+# Engine defaults on macOS (uncomment to change):
+# [realtime.local.capture]
+# device = "0"                 # ffmpeg -f avfoundation -list_devices true -i ""
+# [realtime.local.vad]
+# backend = "auto"             # Silero model when uv is installed, else energy

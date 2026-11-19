@@ -34,6 +34,58 @@ Tests follow upstream CI and need a bigger test stack:
 RUST_MIN_STACK=8388608 cargo test -p codex-tui --lib -- realtime approval voice
 ```
 
+## Install on a Mac
+
+```bash
+scripts/codex-voice/install.sh
+```
+
+This builds `codex` and `codex-local-voice` in release mode (about 20 minutes
+the first time; `--skip-build` installs an existing `codex-rs/target/release`
+build). It installs them, the voice helpers and a config into
+`~/.codex-voice`, which keeps its settings and sessions apart from
+`~/.codex`. The `codex-voice` launcher goes into `~/.local/bin`. Existing
+`config.toml` and `voice.conf` files are kept. You need ffmpeg, uv and a
+signed-in Claude Code, and the terminal needs microphone access.
+
+```bash
+codex-voice              # Claude Code session, listening right away
+codex-voice -m sonnet    # pick the model
+codex-voice models       # voice models and voices on this Mac
+```
+
+The launcher keeps a Whisper server loaded for the session, which makes
+transcripts 3-4x faster. It stops the server when you quit.
+
+### Choosing voice models
+
+Pick the speech models in `~/.codex-voice/voice.conf`:
+
+| Setting | Values |
+|---|---|
+| `tts` | `say` (default) or `local-models` |
+| `say_voice` | a macOS voice (`say -v '?'`); empty for the system voice |
+| `tts_model`, `tts_voice` | a speech model and voice from the local-models gateway, e.g. `hf:mlx-community/Kokoro-82M-8bit` and `af_heart` |
+| `stt` | `whisper-server` (default), `mlx_whisper` or `local-models` |
+| `stt_model` | the Whisper model, e.g. `mlx-community/whisper-small-mlx` |
+| `language` | `en` |
+| `mcp_url` | the gateway, `http://127.0.0.1:5051/mcp` |
+
+`local-models` is the MCP gateway in local-agents (`uv run mcp_server.py
+--transport streamable-http`), which serves Kokoro, Chatterbox and other
+models from this Mac's caches. Each request runs as a separate job. Kokoro
+takes about 7 s per sentence once warm and up to 90 s for the first one, so
+`say` is better for quick back-and-forth. Only cached voices work, because the
+gateway runs offline. If the gateway is down, the launcher falls back to `say`
+or mlx_whisper and says so.
+
+Environment variables override `voice.conf` for one run. They are the setting
+names, upper-cased, with a `CODEX_VOICE_` prefix:
+
+```bash
+CODEX_VOICE_TTS=local-models CODEX_VOICE_TTS_VOICE=hf_alpha codex-voice
+```
+
 ## Voice
 
 Local voice is the recommended voice path. It needs no OpenAI realtime
