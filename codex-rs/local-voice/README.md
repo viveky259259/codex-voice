@@ -229,6 +229,31 @@ Measured on an M-series Mac: under 1 ms per frame, ready about 1.5 s after
 start (once the environment is cached). White hiss at -28 dB scores at most
 0.06, and speech about 1.0.
 
+## Persistent Whisper server (Apple silicon)
+
+The `mlx_whisper` command loads the model for every utterance, about 1.3 s
+per transcript with `whisper-large-v3-turbo`.
+[`helpers/whisper_server.py`](helpers/whisper_server.py) keeps it loaded and
+serves the OpenAI transcription API on `127.0.0.1`, so the existing
+`openai_compatible` backend uses it unchanged. Transcripts then arrive
+0.2–0.4 s after the end of speech.
+
+```bash
+uv run --script codex-rs/local-voice/helpers/whisper_server.py   # --port 8178 --model mlx-community/whisper-large-v3-turbo
+```
+
+```toml
+[stt]
+backend = "openai_compatible"
+base_url = "http://127.0.0.1:8178"
+language = "en"
+```
+
+`GET /health` reports the loaded model. Whisper (turbo included) transcribes
+pure noise as "Thank you." and turbo's `no_speech_prob` is always 0, so pair
+the server with `[vad] backend = "model"`, which keeps noise from reaching
+it.
+
 ## Other settings (defaults shown)
 
 ```toml
