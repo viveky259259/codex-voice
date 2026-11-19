@@ -4651,6 +4651,16 @@
           "description": "Local voice engine settings for `backend = \"local\"`: the `capture`, `vad`, `stt`, `tts`, `playback` and `transcripts` tables of `codex-local-voice` (see `codex-rs/local-voice/README.md`). Every table is optional; unset values use that crate's defaults for this OS.",
           "type": "object"
         },
+        "send_delay_ms": {
+          "description": "Local voice (`backend = \"local\"`): milliseconds a finished utterance waits, with a countdown, before it is sent to the agent. Speaking again within the wait adds to the message and restarts it; saying \"send\" sends at once and \"cancel\" drops it. Defaults to 5000; 0 sends each utterance at once.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "speak_answers": {
+          "description": "Local voice (`backend = \"local\"`): read a short summary of each final answer aloud (at most two sentences; \"Details are on screen.\" when shortened), whether the request was spoken or typed. Defaults to `true`; `false` keeps answers on screen only.",
+          "type": "boolean"
+        },
         "transport": {
           "$ref": "#/definitions/RealtimeTransport"
         },

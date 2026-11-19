@@ -19,6 +19,7 @@ fn active_strip() -> VoiceStrip {
             ],
             speaker_history: vec![0, 37, 73, 110, 146, 219],
             activity: "listening",
+            held: None,
             animations: true,
             progress: true,
         },
@@ -166,4 +167,35 @@ fn voice_controls_follow_configured_mute_binding_and_unbinding() {
         strip.state.activity = "listening";
     }
     insta::assert_snapshot!(layouts.join("\n\n"));
+}
+
+#[test]
+fn held_message_shows_its_countdown_and_text() {
+    let mut strip = active_strip();
+    strip.state.animations = false;
+    strip.state.held = Some(HeldVoiceMessage {
+        text: "List the files in this folder and tell me which ones are large".to_string(),
+        seconds_left: Some(4),
+    });
+    let (wide, _) = rows(&strip, /*width*/ 120);
+    let status = wide.lines().next().unwrap();
+    assert!(status.contains("voice ● sending in 4s"), "{status}");
+    assert!(
+        status.contains("“List the files in this folder"),
+        "{status}"
+    );
+    assert!(status.contains("/voice stop"), "{status}");
+
+    let (narrow, _) = rows(&strip, /*width*/ 60);
+    let status = narrow.lines().next().unwrap();
+    assert!(status.contains("sending in 4s"), "{status}");
+    assert!(status.contains('…'), "{status}");
+    assert!(status.contains("/voice stop"), "{status}");
+
+    // While the user speaks again the countdown pauses.
+    strip.state.activity = "hearing you";
+    strip.state.held.as_mut().unwrap().seconds_left = None;
+    let (paused, _) = rows(&strip, /*width*/ 120);
+    let status = paused.lines().next().unwrap();
+    assert!(status.contains("hearing you  “List the files"), "{status}");
 }

@@ -7,6 +7,11 @@ log_dir = "@CODEX_VOICE_HOME@/log"
 backend = "local"
 auto_start = true
 voice_commands = true
+# A finished utterance waits this long, with a countdown, before it is sent;
+# speaking again adds to it. Say "send" or "cancel". 0 sends at once.
+send_delay_ms = 5000
+# Read a short summary of every answer aloud (with your voice.conf voice).
+speak_answers = true
 
 [tui]
 screen_reader_detection_done = true

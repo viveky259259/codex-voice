@@ -4852,6 +4852,8 @@ impl Config {
                         voice_commands: realtime
                             .voice_commands
                             .unwrap_or(defaults.voice_commands),
+                        send_delay_ms: realtime.send_delay_ms.unwrap_or(defaults.send_delay_ms),
+                        speak_answers: realtime.speak_answers.unwrap_or(defaults.speak_answers),
                         voice_machines: realtime
                             .voice_machines
                             .unwrap_or_default()

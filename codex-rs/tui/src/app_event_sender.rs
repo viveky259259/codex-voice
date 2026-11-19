@@ -50,6 +50,7 @@ impl AppEventSender {
                         | AppCommand::RealtimeConversationSpeech { .. }
                 ) | AppEvent::RealtimeWebrtcOfferCreated { .. }
                     | AppEvent::LocalVoice { .. }
+                    | AppEvent::LocalVoiceSendTick { .. }
                     | AppEvent::RealtimeWebrtcConnected { .. }
                     | AppEvent::StopRealtimeConversation { .. }
                     | AppEvent::RealtimeSessionLockStopped { .. }

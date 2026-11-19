@@ -703,6 +703,15 @@ pub struct RealtimeConfig {
     /// build to run the tests", "switch to opus") during a voice conversation.
     #[serde(default = "default_realtime_voice_commands")]
     pub voice_commands: bool,
+    /// Local voice: how long a finished utterance waits, with a countdown,
+    /// before it is sent. Speaking again adds to it and restarts the wait.
+    /// 0 sends at once.
+    #[serde(default = "default_realtime_send_delay_ms")]
+    pub send_delay_ms: u64,
+    /// Local voice: speak a short summary of every final answer, typed
+    /// requests included. `false` speaks none.
+    #[serde(default = "default_realtime_speak_answers")]
+    pub speak_answers: bool,
     /// Other machines whose agents voice commands list, read, steer, and stop,
     /// over SSH. Only these machines are ever contacted.
     #[serde(default)]
@@ -794,6 +803,14 @@ fn default_realtime_voice_commands() -> bool {
     true
 }
 
+fn default_realtime_send_delay_ms() -> u64 {
+    5_000
+}
+
+fn default_realtime_speak_answers() -> bool {
+    true
+}
+
 impl Default for RealtimeConfig {
     fn default() -> Self {
         Self {
@@ -803,6 +820,8 @@ impl Default for RealtimeConfig {
             voice: None,
             auto_start: false,
             voice_commands: default_realtime_voice_commands(),
+            send_delay_ms: default_realtime_send_delay_ms(),
+            speak_answers: default_realtime_speak_answers(),
             voice_machines: Vec::new(),
             backend: RealtimeBackend::default(),
             local: None,
@@ -825,6 +844,17 @@ pub struct RealtimeToml {
     /// list, check, steer, and stop agents, and switch models. Defaults to
     /// `true`; set `false` to send every utterance to the model.
     pub voice_commands: Option<bool>,
+    /// Local voice (`backend = "local"`): milliseconds a finished utterance
+    /// waits, with a countdown, before it is sent to the agent. Speaking again
+    /// within the wait adds to the message and restarts it; saying "send"
+    /// sends at once and "cancel" drops it. Defaults to 5000; 0 sends each
+    /// utterance at once.
+    pub send_delay_ms: Option<u64>,
+    /// Local voice (`backend = "local"`): read a short summary of each final
+    /// answer aloud (at most two sentences; "Details are on screen." when
+    /// shortened), whether the request was spoken or typed. Defaults to
+    /// `true`; `false` keeps answers on screen only.
+    pub speak_answers: Option<bool>,
     /// Other machines whose agents voice commands may list, read, steer, and
     /// stop, over SSH (`ssh HOST -- codex app-server proxy`). Opt-in: machines
     /// found by `codex remote list` are never contacted unless listed here.
@@ -1270,6 +1300,34 @@ mod tests {
             })
         );
         assert!(RealtimeConfig::default().voice_commands);
+    }
+
+    #[test]
+    fn realtime_send_delay_parses_and_defaults_to_five_seconds() {
+        let config: ConfigToml = toml::from_str("[realtime]\nsend_delay_ms = 0\n")
+            .expect("realtime send_delay_ms should deserialize");
+        assert_eq!(
+            config.realtime,
+            Some(RealtimeToml {
+                send_delay_ms: Some(0),
+                ..RealtimeToml::default()
+            })
+        );
+        assert_eq!(RealtimeConfig::default().send_delay_ms, 5_000);
+    }
+
+    #[test]
+    fn realtime_speak_answers_parses_and_defaults_to_on() {
+        let config: ConfigToml = toml::from_str("[realtime]\nspeak_answers = false\n")
+            .expect("realtime speak_answers should deserialize");
+        assert_eq!(
+            config.realtime,
+            Some(RealtimeToml {
+                speak_answers: Some(false),
+                ..RealtimeToml::default()
+            })
+        );
+        assert!(RealtimeConfig::default().speak_answers);
     }
 
     #[test]

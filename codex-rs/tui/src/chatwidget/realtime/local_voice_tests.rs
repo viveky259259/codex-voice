@@ -82,7 +82,13 @@ impl Harness {
     }
 
     async fn start_on(thread_id: ThreadId) -> Self {
+        // Most tests send each utterance at once; the held-message tests set a delay.
+        Self::start_with_delay(thread_id, /*send_delay_ms*/ 0).await
+    }
+
+    async fn start_with_delay(thread_id: ThreadId, send_delay_ms: u64) -> Self {
         let (mut chat, _sender, events, ops) = make_chatwidget_manual_with_sender().await;
+        chat.config.realtime.send_delay_ms = send_delay_ms;
         let engine = Arc::new(FakeEngine::default());
         let (voice_events, receiver) = mpsc::channel(16);
         let receiver = Rc::new(RefCell::new(Some(receiver)));
@@ -409,7 +415,7 @@ async fn claude_code_voice_turn_answer_is_spoken() {
 }
 
 #[tokio::test]
-async fn typed_turns_are_not_spoken() {
+async fn answers_to_typed_and_spoken_turns_are_spoken() {
     let mut h = Harness::start().await;
     h.chat.apply_external_edit("typed question".to_string());
     h.chat.handle_key_event(crossterm::event::KeyEvent::from(
@@ -419,14 +425,25 @@ async fn typed_turns_are_not_spoken() {
     h.user_item("turn-typed", "typed question");
 
     h.complete_turn("turn-typed", "Here is the answer.");
+    assert_eq!(
+        h.engine.take_spoken(),
+        vec!["Here is the answer.".to_string()]
+    );
 
-    assert_eq!(h.engine.take_spoken(), Vec::<String>::new());
-
-    // A voice turn after it is still spoken.
     h.say("and now by voice");
     h.user_item("turn-voice", "and now by voice");
     h.complete_turn("turn-voice", "Spoken answer.");
     assert_eq!(h.engine.take_spoken(), vec!["Spoken answer.".to_string()]);
+}
+
+#[tokio::test]
+async fn speak_answers_off_keeps_answers_on_screen() {
+    let mut h = Harness::start().await;
+    h.chat.config.realtime.speak_answers = false;
+    h.say("what changed");
+    h.user_item("turn-voice", "what changed");
+    h.complete_turn("turn-voice", "Two files changed.");
+    assert_eq!(h.engine.take_spoken(), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -850,4 +867,131 @@ async fn clean_capture_end_is_a_notice_not_an_error() {
     assert!(!history.contains("microphone access"), "{history}");
     assert_eq!(h.engine.take_spoken(), Vec::<String>::new());
     assert_eq!(h.chat.local_voice_activity_for_test(), Some("mic off"));
+}
+
+fn held(harness: &Harness) -> Option<HeldVoiceMessage> {
+    harness
+        .chat
+        .realtime_conversation
+        .local
+        .as_ref()
+        .and_then(|local| local.held_message(Instant::now()))
+}
+
+/// End the held message's wait now and deliver its countdown tick.
+fn expire_held(harness: &mut Harness) {
+    let local = harness
+        .chat
+        .realtime_conversation
+        .local
+        .as_mut()
+        .expect("local voice runs");
+    local.held.as_mut().expect("a held message").deadline =
+        Some(Instant::now() - Duration::from_millis(1));
+    let countdown = local.countdown;
+    let attempt_id = harness.chat.local_voice_attempt_for_test();
+    harness.chat.on_local_voice_send_tick(attempt_id, countdown);
+}
+
+#[test]
+fn held_input_commands_match_whole_utterances_only() {
+    for text in ["Send.", "send it", "Send it now!", "Go."] {
+        assert_eq!(
+            held_input_command(text),
+            Some(HeldInputCommand::Send),
+            "{text}"
+        );
+    }
+    for text in ["Cancel.", "Never mind.", "Scratch that.", "Don't send it."] {
+        assert_eq!(
+            held_input_command(text),
+            Some(HeldInputCommand::Cancel),
+            "{text}"
+        );
+    }
+    for text in [
+        "Send the email to Sam.",
+        "cancel the build",
+        "go ahead",
+        "stop",
+    ] {
+        assert_eq!(held_input_command(text), None, "{text}");
+    }
+}
+
+#[tokio::test]
+async fn spoken_message_is_held_with_a_countdown_then_sent() {
+    let mut harness = Harness::start_with_delay(ThreadId::new(), /*send_delay_ms*/ 5_000).await;
+    harness.say("List the files");
+    assert_eq!(harness.drain().user_turns(), Vec::<String>::new());
+    assert_eq!(
+        held(&harness),
+        Some(HeldVoiceMessage {
+            text: "List the files".to_string(),
+            seconds_left: Some(5),
+        })
+    );
+
+    // Speaking again pauses the countdown and adds to the message.
+    harness.event(LocalVoiceEvent::SpeechStarted);
+    assert_eq!(held(&harness).and_then(|held| held.seconds_left), None);
+    harness.event(LocalVoiceEvent::SpeechEnded);
+    harness.event(LocalVoiceEvent::Transcript {
+        text: "in this folder.".to_string(),
+    });
+    assert_eq!(held(&harness).and_then(|held| held.seconds_left), Some(5));
+
+    // A stale tick from the first countdown changes nothing.
+    let attempt_id = harness.chat.local_voice_attempt_for_test();
+    harness
+        .chat
+        .on_local_voice_send_tick(attempt_id, /*countdown*/ 1);
+    assert!(held(&harness).is_some());
+
+    expire_held(&mut harness);
+    assert_eq!(
+        harness.drain().user_turns(),
+        vec!["List the files in this folder.".to_string()]
+    );
+    assert_eq!(held(&harness), None);
+}
+
+#[tokio::test]
+async fn speech_without_a_transcript_resumes_the_countdown() {
+    let mut harness = Harness::start_with_delay(ThreadId::new(), /*send_delay_ms*/ 5_000).await;
+    harness.say("Run the tests");
+    harness.event(LocalVoiceEvent::SpeechStarted);
+    assert_eq!(held(&harness).and_then(|held| held.seconds_left), None);
+    // Noise: the engine drops it and goes back to listening.
+    harness.event(LocalVoiceEvent::Listening);
+    assert_eq!(held(&harness).and_then(|held| held.seconds_left), Some(5));
+}
+
+#[tokio::test]
+async fn saying_send_or_cancel_acts_on_the_held_message() {
+    let mut harness = Harness::start_with_delay(ThreadId::new(), /*send_delay_ms*/ 5_000).await;
+    harness.say("Explain the build script");
+    harness.say("Send it.");
+    assert_eq!(
+        harness.drain().user_turns(),
+        vec!["Explain the build script".to_string()]
+    );
+
+    harness.say("Delete the logs");
+    harness.say("Cancel.");
+    let drained = harness.drain();
+    assert_eq!(drained.user_turns(), Vec::<String>::new());
+    assert!(
+        drained
+            .history
+            .iter()
+            .any(|line| line.contains("Voice message cancelled: “Delete the logs”")),
+        "{:?}",
+        drained.history
+    );
+    assert_eq!(held(&harness), None);
+
+    // Without a held message, "send" is an ordinary message.
+    harness.say("Send.");
+    assert!(held(&harness).is_some());
 }

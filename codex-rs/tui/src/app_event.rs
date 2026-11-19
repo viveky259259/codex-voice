@@ -1536,6 +1536,14 @@ pub(crate) enum AppEvent {
         event: codex_local_voice::LocalVoiceEvent,
     },
 
+    /// A held spoken message's countdown ticked: update it, or send it once
+    /// its delay is over. Ticks from an older countdown are ignored.
+    LocalVoiceSendTick {
+        thread_id: ThreadId,
+        attempt_id: u64,
+        countdown: u64,
+    },
+
     /// Result of creating a TUI-owned WebRTC offer for an active thread.
     RealtimeWebrtcOfferCreated {
         thread_id: ThreadId,

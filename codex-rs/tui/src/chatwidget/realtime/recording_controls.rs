@@ -301,6 +301,11 @@ impl ChatWidget {
                 .map(|(_, speaker)| *speaker)
                 .collect(),
             activity,
+            held: self
+                .realtime_conversation
+                .local
+                .as_ref()
+                .and_then(|local| local.held_message(Instant::now())),
             animations: self.local_settings.tui.animations,
             progress: self.local_settings.tui.effects.progress,
         }));

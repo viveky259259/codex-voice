@@ -114,6 +114,7 @@ fn draft_and_voice_composer_snapshots() {
                             microphone_history: vec![0, 37, 73, 110, 146, 255],
                             speaker_history: vec![255, 146, 110, 73, 37, 0],
                             activity: "listening",
+                            held: None,
                             animations: false,
                             progress: true,
                         }),

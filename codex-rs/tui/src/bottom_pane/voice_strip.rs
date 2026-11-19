@@ -34,8 +34,35 @@ pub(crate) struct VoiceStripState {
     pub(crate) microphone_history: Vec<u8>,
     pub(crate) speaker_history: Vec<u8>,
     pub(crate) activity: &'static str,
+    /// A spoken message waiting to be sent, shown after the activity.
+    pub(crate) held: Option<HeldVoiceMessage>,
     pub(crate) animations: bool,
     pub(crate) progress: bool,
+}
+
+/// A finished utterance waiting out its send delay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HeldVoiceMessage {
+    pub(crate) text: String,
+    /// Whole seconds until it is sent; `None` while the user is speaking again.
+    pub(crate) seconds_left: Option<u64>,
+}
+
+/// `text` cut to `width` columns, ending in an ellipsis when shortened.
+fn truncate_to_width(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let next = format!("{out}{ch}");
+        if next.width() + 1 > width {
+            break;
+        }
+        out = next;
+    }
+    out.push('…');
+    out
 }
 
 pub(super) struct VoiceStrip {
@@ -94,7 +121,11 @@ impl Renderable for VoiceStrip {
         } else {
             "◌".dark_gray()
         };
-        let activity = format!(" {}", self.state.activity).into();
+        let activity: Span<'static> =
+            match self.state.held.as_ref().and_then(|held| held.seconds_left) {
+                Some(seconds) => format!(" sending in {seconds}s").cyan().bold(),
+                None => format!(" {}", self.state.activity).into(),
+            };
         let mut status = Line::from(vec!["voice ".dim(), marker, activity]);
         let mute = self.state.mute_hint.map_or_else(
             || "/voice mute".to_string(),
@@ -127,6 +158,14 @@ impl Renderable for VoiceStrip {
         };
         if available < status.width() + controls.width() + 1 {
             status = Line::from(vec!["voice".dim()]);
+        } else if let Some(held) = &self.state.held {
+            // The held message, quoted, in whatever room the controls leave.
+            let room = available.saturating_sub(status.width() + controls.width() + 6);
+            if room >= 8 {
+                status
+                    .spans
+                    .push(format!("  “{}”", truncate_to_width(&held.text, room)).italic());
+            }
         }
         status.spans.push(
             " ".repeat(available.saturating_sub(status.width() + controls.width()))

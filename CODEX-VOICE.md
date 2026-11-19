@@ -103,9 +103,9 @@ speech-to-text command (mlx_whisper on macOS) transcribes each utterance, and
 `say` speaks. Each transcript is handled as a spoken approval answer, then as
 a voice command, and otherwise submitted exactly like a typed message (it
 steers a running turn the way Enter does). Prompts and outcomes are spoken,
-and so is a short summary of each answer to a spoken request (at most two
-sentences, no code; "Details are on screen." when shortened). Answers to
-typed requests are not spoken. Any text model works, including Ollama and
+and so is a short summary of each answer, typed requests included (at most
+two sentences, no code; "Details are on screen." when shortened). `[realtime]
+speak_answers = false` keeps answers on screen only. Any text model works, including Ollama and
 Claude through the proxy below.
 
 `~/.codex/config.toml`:
@@ -138,6 +138,14 @@ Microphone). A missing program or a denied microphone is reported once, with
 the fix. See `codex-rs/local-voice/README.md` for other speech-to-text and
 text-to-speech backends (whisper.cpp server, Kokoro, an MCP server), and
 `HANDOFF.md` ("Local voice on the Mac") for a step-by-step test.
+
+When you stop talking, what you said waits 5 seconds before it is sent. The
+voice strip shows the countdown and the text ("sending in 4s “…”"). Speaking
+again adds to the message and restarts the wait, so a pause mid-thought
+doesn't send half a sentence. Say "send" to send it at once, or "cancel" (or
+"never mind") to drop it. Approval answers and voice commands still act at
+once. `[realtime] send_delay_ms` sets the wait; 0 sends each utterance at
+once.
 
 F8 or `/voice` toggles voice by hand; F9 mutes the microphone and cuts off
 speech in progress. While an approval prompt is open, speech that is neither

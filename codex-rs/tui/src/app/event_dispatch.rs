@@ -2628,6 +2628,15 @@ impl App {
                     owner.on_local_voice_event(attempt_id, event);
                 }
             }
+            AppEvent::LocalVoiceSendTick {
+                thread_id,
+                attempt_id,
+                countdown,
+            } => {
+                if let Some(owner) = self.voice_widget_for_thread(thread_id) {
+                    owner.on_local_voice_send_tick(attempt_id, countdown);
+                }
+            }
             AppEvent::RealtimeWebrtcOfferCreated {
                 thread_id,
                 attempt_id,
