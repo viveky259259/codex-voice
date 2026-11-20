@@ -34,7 +34,7 @@ pub(crate) struct CreatedCall {
 
 /// The TUI answers approval prompts from the user's own transcript. Ask the
 /// voice model not to hand those short replies to Codex as new requests.
-const VOICE_APPROVAL_INSTRUCTIONS: &str = "When Codex is waiting for the user to approve an action, this client handles short spoken replies such as approve, yes, allow, go ahead, confirm, deny, no, reject, or stop by itself. Do not hand those replies off to Codex; wait for the client to speak the outcome.";
+const VOICE_APPROVAL_INSTRUCTIONS: &str = "When Codex is waiting for the user to approve an action, this client handles short spoken replies such as approve, yes, allow, go ahead, confirm, deny, no, reject, stop, or an option of the prompt by number, letter or label (option 4, d, continue without permissions) by itself. Do not hand those replies off to Codex; wait for the client to speak the outcome.";
 
 fn with_voice_approval_instructions(instructions: String) -> String {
     if instructions.trim().is_empty() {

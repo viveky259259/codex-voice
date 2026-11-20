@@ -359,6 +359,73 @@ async fn spoken_refusals_apply_immediately_without_confirmation() {
 }
 
 #[tokio::test]
+async fn a_refusing_option_named_by_number_letter_or_label_applies_at_once() {
+    for utterance in [
+        "Option 3.",
+        "option d",
+        "D.",
+        "the third one",
+        "No, continue without running it.",
+    ] {
+        let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+        let thread_id = activate_voice(&mut chat);
+        chat.push_approval_request(exec_approval(thread_id, "exec-1", "ls", &ALL_DECISIONS));
+        spoken(&mut ops);
+
+        say(&mut chat, utterance);
+
+        let (submitted, _) = drain_events(&mut chat, &mut events);
+        assert_eq!(
+            submitted
+                .iter()
+                .filter_map(exec_decision)
+                .collect::<Vec<_>>(),
+            vec![("exec-1", &CommandExecutionApprovalDecision::Decline)],
+            "{utterance}"
+        );
+        assert_eq!(
+            spoken(&mut ops),
+            vec!["Option 3, No, continue without running it.".to_string()],
+            "{utterance}"
+        );
+        assert!(chat.bottom_pane.current_approval_request().is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_granting_option_waits_for_confirm() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let thread_id = activate_voice(&mut chat);
+    chat.push_approval_request(exec_approval(thread_id, "exec-1", "ls", &ALL_DECISIONS));
+    spoken(&mut ops);
+
+    say(&mut chat, "option a");
+    let prompt =
+        "Option 2, Yes, and don't ask again for this command in this session? Say confirm.";
+    assert_eq!(spoken(&mut ops), vec![prompt.to_string()]);
+    let (submitted, history) = drain_events(&mut chat, &mut events);
+    assert!(
+        submitted.is_empty(),
+        "an option that grants must not apply alone"
+    );
+    assert!(history.contains(prompt), "{history}");
+
+    say(&mut chat, "confirm");
+    let (submitted, _) = drain_events(&mut chat, &mut events);
+    assert_eq!(
+        submitted
+            .iter()
+            .filter_map(exec_decision)
+            .collect::<Vec<_>>(),
+        vec![(
+            "exec-1",
+            &CommandExecutionApprovalDecision::AcceptForSession
+        )]
+    );
+    assert!(chat.bottom_pane.current_approval_request().is_none());
+}
+
+#[tokio::test]
 async fn deny_falls_back_to_abort_when_decline_is_not_offered() {
     let (mut chat, _sender, mut events, _ops) = make_chatwidget_manual_with_sender().await;
     let thread_id = activate_voice(&mut chat);
@@ -757,7 +824,11 @@ async fn a_remote_approval_names_its_machine_and_needs_confirm() {
 async fn a_remote_denial_applies_at_once() {
     let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
     activate_voice(&mut chat);
-    chat.push_approval_request(remote_exec_approval(ThreadId::new(), "exec-1", "rm -rf target"));
+    chat.push_approval_request(remote_exec_approval(
+        ThreadId::new(),
+        "exec-1",
+        "rm -rf target",
+    ));
     spoken(&mut ops);
 
     say(&mut chat, "deny");

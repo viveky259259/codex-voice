@@ -165,6 +165,7 @@ Spoken approvals, while an approval prompt is open:
 | "approve for this session", "always allow" | Same, with session scope (if offered). |
 | "no", "deny", "reject" | Denies immediately. |
 | "stop", "cancel", "abort" | Aborts immediately. |
+| An option of the prompt: its number ("option 4", "four", "the fourth one"), its letter ("option d", "d") or its words ("continue without permissions") | A refusing option applies immediately ("Option 4, No, continue without permissions."); one that grants anything asks "Option 1, Yes, …? Say confirm." first. |
 
 Anything with a negation or hedge ("don't approve", "maybe") is never an
 answer. Only your own words count: if the voice model relays "confirm" on your

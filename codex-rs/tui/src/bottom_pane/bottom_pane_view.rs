@@ -204,6 +204,18 @@ pub(crate) trait BottomPaneView: Renderable {
         false
     }
 
+    /// The options of the current approval prompt, in display order.
+    fn voice_approval_options(&self) -> Vec<super::VoiceApprovalOption> {
+        Vec::new()
+    }
+
+    /// Choose the option at `index` of the current approval prompt by voice.
+    ///
+    /// Returns `true` when it was submitted.
+    fn apply_voice_approval_option(&mut self, _index: usize) -> bool {
+        false
+    }
+
     /// Try to handle approval request; return the original value if not
     /// consumed.
     fn try_consume_approval_request(

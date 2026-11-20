@@ -245,6 +245,18 @@ pub(crate) enum VoiceApprovalDecision {
     Abort,
 }
 
+/// One option of the visible approval prompt, as a spoken answer can name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VoiceApprovalOption {
+    /// The label shown in the prompt, e.g. "No, continue without permissions".
+    pub(crate) label: String,
+    /// Its letter shortcuts, lowercase, e.g. `d` for "(d)".
+    pub(crate) keys: Vec<char>,
+    /// Whether choosing it grants anything. Such options need a spoken
+    /// "confirm" before they are applied; refusals apply at once.
+    pub(crate) approves: bool,
+}
+
 /// Modal overlay asking the user to approve or deny one or more requests.
 pub(crate) struct ApprovalOverlay {
     current_request: Option<ApprovalRequest>,
@@ -783,6 +795,44 @@ impl BottomPaneView for ApprovalOverlay {
         true
     }
 
+    fn voice_approval_options(&self) -> Vec<VoiceApprovalOption> {
+        if self.current_complete || self.done || self.current_request.is_none() {
+            return Vec::new();
+        }
+        self.options
+            .iter()
+            .map(|option| VoiceApprovalOption {
+                label: option.label.clone(),
+                keys: option
+                    .shortcuts
+                    .iter()
+                    .filter_map(|shortcut| match shortcut.parts() {
+                        (KeyCode::Char(key), modifiers)
+                            if modifiers == KeyModifiers::NONE
+                                || modifiers == KeyModifiers::SHIFT =>
+                        {
+                            Some(key.to_ascii_lowercase())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                approves: option.decision.approves(),
+            })
+            .collect()
+    }
+
+    fn apply_voice_approval_option(&mut self, index: usize) -> bool {
+        if self.current_complete
+            || self.done
+            || self.current_request.is_none()
+            || index >= self.options.len()
+        {
+            return false;
+        }
+        self.apply_selection(index);
+        true
+    }
+
     fn dismiss_app_server_request(&mut self, request: &ResolvedAppServerRequest) -> bool {
         self.dismiss_resolved_request(request)
     }
@@ -976,6 +1026,38 @@ enum ApprovalDecision {
     FileChange(FileChangeApprovalDecision),
     Permissions(PermissionsDecision),
     McpElicitation(McpServerElicitationAction),
+}
+
+impl ApprovalDecision {
+    /// Whether this choice grants anything. Anything that is not a plain
+    /// refusal counts, so a new kind of grant still asks for confirmation.
+    fn approves(&self) -> bool {
+        match self {
+            ApprovalDecision::Command(decision) => {
+                !matches!(
+                    decision,
+                    CommandExecutionApprovalDecision::Decline
+                        | CommandExecutionApprovalDecision::Cancel
+                ) && !matches!(
+                    decision,
+                    CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+                        network_policy_amendment,
+                    } if matches!(network_policy_amendment.action, NetworkPolicyRuleAction::Deny)
+                )
+            }
+            ApprovalDecision::FileChange(decision) => !matches!(
+                decision,
+                FileChangeApprovalDecision::Decline | FileChangeApprovalDecision::Cancel
+            ),
+            ApprovalDecision::Permissions(decision) => {
+                !matches!(decision, PermissionsDecision::Deny)
+            }
+            ApprovalDecision::McpElicitation(action) => !matches!(
+                action,
+                McpServerElicitationAction::Decline | McpServerElicitationAction::Cancel
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2206,6 +2288,56 @@ mod tests {
             saw_op,
             "expected permission approval decision to emit a session-scoped response"
         );
+    }
+
+    #[test]
+    fn voice_sees_permission_options_with_their_letters() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx);
+        let mut view = make_overlay(make_permissions_request(), tx, Features::with_defaults());
+
+        let options = view.voice_approval_options();
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| (option.label.as_str(), option.keys.clone(), option.approves))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Yes, grant these permissions for this turn",
+                    vec!['y'],
+                    true
+                ),
+                (
+                    "Yes, grant for this turn with strict auto review",
+                    vec!['r'],
+                    true
+                ),
+                (
+                    "Yes, grant these permissions for this session",
+                    vec!['a'],
+                    true
+                ),
+                ("No, continue without permissions", vec!['d'], false),
+            ]
+        );
+        assert!(!view.apply_voice_approval_option(4));
+
+        assert!(view.apply_voice_approval_option(3));
+
+        let mut saw_op = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::SubmitThreadOp {
+                op: Op::RequestPermissionsResponse { response, .. },
+                ..
+            } = ev
+            {
+                assert!(response.permissions.is_empty());
+                saw_op = true;
+            }
+        }
+        assert!(saw_op, "expected the voice choice to deny the permissions");
+        assert!(view.voice_approval_options().is_empty());
     }
 
     #[test]

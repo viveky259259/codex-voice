@@ -270,3 +270,104 @@ fn limit_words_marks_truncation() {
     assert_eq!(limit_words("a b c", 3), "a b c");
     assert_eq!(limit_words("a  b c d", 2), "a b…");
 }
+
+fn permission_options() -> Vec<VoiceApprovalOption> {
+    [
+        ("Yes, grant these permissions for this turn", 'y', true),
+        (
+            "Yes, grant for this turn with strict auto review",
+            'r',
+            true,
+        ),
+        ("Yes, grant these permissions for this session", 'a', true),
+        ("No, continue without permissions", 'd', false),
+    ]
+    .into_iter()
+    .map(|(label, key, approves)| VoiceApprovalOption {
+        label: label.to_string(),
+        keys: vec![key],
+        approves,
+    })
+    .collect()
+}
+
+#[test]
+fn options_are_chosen_by_number_letter_or_label() {
+    let options = permission_options();
+    for (utterance, expected) in [
+        ("option d", 3),
+        ("Option D.", 3),
+        ("D.", 3),
+        ("d", 3),
+        ("4", 3),
+        ("Option 4.", 3),
+        ("option four", 3),
+        ("Option for.", 3),
+        ("number 4", 3),
+        ("option number 4", 3),
+        ("The fourth one.", 3),
+        ("fourth option", 3),
+        ("4th", 3),
+        ("the last option", 3),
+        ("Continue without permissions.", 3),
+        ("No, continue without permission.", 3),
+        ("no continue without permissions please", 3),
+        ("Okay, I'll go with option 2.", 1),
+        ("strict auto review", 1),
+        ("option r", 1),
+        ("Option are.", 1),
+        ("option a", 2),
+        ("grant these permissions for this session", 2),
+        ("One.", 0),
+        ("y", 0),
+        ("Yes, grant these permissions for this turn.", 0),
+    ] {
+        assert_eq!(
+            parse_voice_approval_option(utterance, &options),
+            Some(expected),
+            "{utterance}"
+        );
+    }
+}
+
+#[test]
+fn other_speech_names_no_option() {
+    let options = permission_options();
+    for utterance in [
+        "",
+        "no",
+        "yes",
+        "approve",
+        "confirm",
+        "deny",
+        "option 7",
+        "option z",
+        "seven",
+        // Two options say this.
+        "for this turn",
+        "don't continue without permissions",
+        "continue",
+        "I think we should continue without permissions for this turn and then ask again later",
+        "4 files changed",
+    ] {
+        assert_eq!(
+            parse_voice_approval_option(utterance, &options),
+            None,
+            "{utterance}"
+        );
+    }
+    assert_eq!(parse_voice_approval_option("option d", &[]), None);
+}
+
+#[test]
+fn option_phrases_name_the_number_and_label() {
+    let options = permission_options();
+    assert_eq!(
+        approval_option_phrase(3, &options[3]),
+        "Option 4, No, continue without permissions"
+    );
+    assert_eq!(
+        approval_option_confirmation_prompt(1, &options[1]),
+        "Option 2, Yes, grant for this turn with strict auto review? Say confirm."
+    );
+}

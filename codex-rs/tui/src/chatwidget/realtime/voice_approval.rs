@@ -7,6 +7,7 @@
 //! or long commands.
 
 use crate::bottom_pane::ApprovalRequest;
+use crate::bottom_pane::VoiceApprovalOption;
 use crate::exec_command::strip_bash_lc_and_escape;
 use codex_app_server_protocol::CommandExecutionApprovalKind;
 
@@ -198,6 +199,172 @@ pub(crate) fn parse_voice_approval_intent(utterance: &str) -> Option<VoiceApprov
         return Some(VoiceApprovalIntent::Approve);
     }
     None
+}
+
+/// Utterances longer than this are conversation, not an option choice.
+const MAX_OPTION_WORDS: usize = 10;
+/// Words that may lead into a choice: "okay, I'll go with option 4".
+const OPTION_LEAD_INS: &[&str] = &[
+    "ok", "okay", "um", "uh", "hmm", "so", "please", "codex", "claude", "i", "i'll", "i'd",
+    "let's", "lets", "want", "like", "choose", "pick", "select", "press", "hit", "type", "take",
+    "go", "with", "use", "the",
+];
+const OPTION_TRAILERS: &[&str] = &["please", "thanks", "now", "then", "codex", "claude"];
+/// Words that name an option by its position or letter: "option 4", "letter d".
+const OPTION_PREFIXES: &[&str] = &["option", "number", "choice", "letter", "key", "button"];
+/// Words after an ordinal: "the fourth one", "fourth option".
+const OPTION_SUFFIXES: &[&str] = &["one", "option", "choice"];
+const NUMBER_WORDS: &[&str] = &[
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+];
+const ORDINAL_WORDS: &[&str] = &[
+    "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+];
+/// Words a transcriber writes for a spoken number or letter, accepted only
+/// after "option" and the like: "option to", "option dee".
+const SOUNDALIKES: &[(&str, &str)] = &[
+    ("won", "1"),
+    ("to", "2"),
+    ("too", "2"),
+    ("for", "4"),
+    ("ay", "a"),
+    ("bee", "b"),
+    ("see", "c"),
+    ("sea", "c"),
+    ("dee", "d"),
+    ("are", "r"),
+    ("why", "y"),
+];
+
+/// Position (1-based) named by a number, number word or ordinal: "4", "four",
+/// "4th", "fourth".
+fn option_number(word: &str) -> Option<usize> {
+    let digits = word
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(word.len());
+    if digits > 0 && matches!(&word[digits..], "" | "st" | "nd" | "rd" | "th") {
+        return word[..digits].parse().ok();
+    }
+    NUMBER_WORDS
+        .iter()
+        .chain(ORDINAL_WORDS)
+        .position(|name| *name == word)
+        .map(|index| index % NUMBER_WORDS.len() + 1)
+}
+
+/// The option an explicit reference names: a number, an ordinal, "last", or
+/// one of the option's letters.
+fn option_by_reference(words: &[&str], options: &[VoiceApprovalOption]) -> Option<usize> {
+    let (word, prefixed) = match words {
+        [word] => (*word, false),
+        [prefix, word] if OPTION_PREFIXES.contains(prefix) => (*word, true),
+        ["option", "number", word] => (*word, true),
+        [word, suffix] if OPTION_SUFFIXES.contains(suffix) => (*word, false),
+        _ => return None,
+    };
+    let word = if prefixed {
+        SOUNDALIKES
+            .iter()
+            .find(|(heard, _)| *heard == word)
+            .map_or(word, |(_, meant)| *meant)
+    } else {
+        word
+    };
+    if word == "last" {
+        return options.len().checked_sub(1);
+    }
+    if let Some(number) = option_number(word) {
+        return (1..=options.len()).contains(&number).then(|| number - 1);
+    }
+    let mut letters = word.chars();
+    if let (Some(letter), None) = (letters.next(), letters.next())
+        && letter.is_ascii_alphabetic()
+    {
+        return options
+            .iter()
+            .position(|option| option.keys.contains(&letter));
+    }
+    None
+}
+
+/// Plural-insensitive form of a word, so "permission" matches "permissions".
+fn stem(word: &str) -> &str {
+    if word.len() > 3 && word.ends_with('s') && !word.ends_with("ss") {
+        &word[..word.len() - 1]
+    } else {
+        word
+    }
+}
+
+/// The one option whose label the utterance repeats: all of it, all of it
+/// after its leading "yes"/"no", or at least three words in a row of it.
+fn option_by_label(words: &[&str], options: &[VoiceApprovalOption]) -> Option<usize> {
+    let said: Vec<&str> = words.iter().map(|word| stem(word)).collect();
+    let mut matched = options.iter().enumerate().filter(|(_, option)| {
+        let label_words = normalized_words(&option.label);
+        let label: Vec<&str> = label_words.iter().map(|word| stem(word)).collect();
+        let without_answer = match label.first() {
+            Some(&"yes" | &"no") => &label[1..],
+            _ => &label[..],
+        };
+        said == label
+            || (!without_answer.is_empty() && said == without_answer)
+            || (said.len() >= 3 && label.windows(said.len()).any(|window| window == said))
+    });
+    match (matched.next(), matched.next()) {
+        (Some((index, _)), None) => Some(index),
+        _ => None,
+    }
+}
+
+/// Which option of the visible approval prompt an utterance chooses, if it
+/// names one: by number ("option 4", "four", "the fourth one"), by its letter
+/// ("option d", "d"), or by repeating its label ("continue without
+/// permissions"). Returns its index.
+pub(crate) fn parse_voice_approval_option(
+    utterance: &str,
+    options: &[VoiceApprovalOption],
+) -> Option<usize> {
+    if options.is_empty() {
+        return None;
+    }
+    let words = normalized_words(utterance);
+    if words.is_empty() || words.len() > MAX_OPTION_WORDS {
+        return None;
+    }
+    let mut words: Vec<&str> = words.iter().map(String::as_str).collect();
+    while words.len() > 1 && OPTION_LEAD_INS.contains(&words[0]) {
+        words.remove(0);
+    }
+    while words.len() > 1
+        && words
+            .last()
+            .is_some_and(|word| OPTION_TRAILERS.contains(word))
+    {
+        words.pop();
+    }
+    option_by_reference(&words, options).or_else(|| option_by_label(&words, options))
+}
+
+/// "Option 4, no, continue without permissions" for speech and the transcript.
+pub(crate) fn approval_option_phrase(index: usize, option: &VoiceApprovalOption) -> String {
+    let label = option.label.replace('`', "");
+    limit_words(
+        &format!("Option {}, {label}", index + 1),
+        MAX_SPOKEN_WORDS - 3,
+    )
+}
+
+/// Spoken after an option that grants something is chosen; only a following
+/// "confirm" applies it.
+pub(crate) fn approval_option_confirmation_prompt(
+    index: usize,
+    option: &VoiceApprovalOption,
+) -> String {
+    format!(
+        "{}? Say confirm.",
+        approval_option_phrase(index, option).trim_end_matches(['.', '…'])
+    )
 }
 
 /// Cap text at `max_words`, marking a cut with an ellipsis.

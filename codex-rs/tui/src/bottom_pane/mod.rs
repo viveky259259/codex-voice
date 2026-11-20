@@ -120,6 +120,7 @@ pub(crate) use approval_overlay::ExecApprovalRequest;
 pub(crate) use approval_overlay::McpElicitationApprovalRequest;
 pub(crate) use approval_overlay::PermissionsApprovalRequest;
 pub(crate) use approval_overlay::VoiceApprovalDecision;
+pub(crate) use approval_overlay::VoiceApprovalOption;
 pub(crate) use approval_overlay::format_requested_permissions_rule;
 pub(crate) use approval_overlay::remote_thread_label;
 pub(crate) use approval_overlay::resolved_voice_key;
@@ -783,6 +784,30 @@ impl BottomPane {
             return false;
         };
         if !view.apply_voice_approval(decision) {
+            return false;
+        }
+        if view.is_complete() {
+            let completion = view.completion();
+            self.pop_active_view_with_completion(completion);
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// The options of the visible approval prompt, in display order.
+    pub(crate) fn voice_approval_options(&self) -> Vec<VoiceApprovalOption> {
+        self.active_view()
+            .map(|view| view.voice_approval_options())
+            .unwrap_or_default()
+    }
+
+    /// Choose an option of the visible approval prompt by voice, exactly as if
+    /// it was selected.
+    pub(crate) fn apply_voice_approval_option(&mut self, index: usize) -> bool {
+        let Some(view) = self.view_stack.last_mut() else {
+            return false;
+        };
+        if !view.apply_voice_approval_option(index) {
             return false;
         }
         if view.is_complete() {

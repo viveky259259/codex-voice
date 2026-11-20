@@ -16,9 +16,12 @@ use super::realtime_voice_supported;
 use super::voice_approval::MAX_SPOKEN_WORDS;
 use super::voice_approval::VoiceApprovalIntent;
 use super::voice_approval::approval_confirmation_prompt;
+use super::voice_approval::approval_option_confirmation_prompt;
+use super::voice_approval::approval_option_phrase;
 use super::voice_approval::approval_request_prompt;
 use super::voice_approval::limit_words;
 use super::voice_approval::parse_voice_approval_intent;
+use super::voice_approval::parse_voice_approval_option;
 use super::voice_approval::turn_error_speech;
 use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_command::AppCommand;
@@ -68,6 +71,8 @@ pub(crate) struct ConsumedVoiceControl {
 pub(crate) struct PendingVoiceApproval {
     request_key: String,
     intent: VoiceApprovalIntent,
+    /// Set when a prompt option was chosen by number, letter or label.
+    option: Option<usize>,
 }
 
 fn decision_for(intent: VoiceApprovalIntent) -> Option<VoiceApprovalDecision> {
@@ -480,6 +485,30 @@ impl ChatWidget {
             .voice_approval
             .take()
             .filter(|pending| pending.request_key == request_key);
+        // "Option 4", "d" or "continue without permissions": the prompt's own
+        // options, by number, letter or label.
+        let options = self.bottom_pane.voice_approval_options();
+        if let Some(index) = parse_voice_approval_option(utterance, &options) {
+            let option = &options[index];
+            if option.approves {
+                let prompt = approval_option_confirmation_prompt(index, option);
+                self.realtime_conversation.voice_controls.voice_approval =
+                    Some(PendingVoiceApproval {
+                        request_key,
+                        intent: VoiceApprovalIntent::Approve,
+                        option: Some(index),
+                    });
+                self.add_info_message(prompt.clone(), /*hint*/ None);
+                self.speak_realtime_status(&prompt);
+            } else if self.bottom_pane.apply_voice_approval_option(index) {
+                self.speak_realtime_status(&format!("{}.", approval_option_phrase(index, option)));
+                self.after_voice_approval_decision();
+            } else {
+                self.speak_realtime_status("That option is no longer available.");
+            }
+            self.request_redraw();
+            return true;
+        }
         let Some(intent) = parse_voice_approval_intent(utterance) else {
             if pending.is_some() {
                 self.add_info_message(
@@ -496,10 +525,14 @@ impl ChatWidget {
                     self.speak_realtime_status("Say approve first, then confirm.");
                     return true;
                 };
-                let Some(decision) = decision_for(pending.intent) else {
-                    return true;
+                let applied = match pending.option {
+                    Some(index) => self.bottom_pane.apply_voice_approval_option(index),
+                    None => match decision_for(pending.intent) {
+                        Some(decision) => self.bottom_pane.apply_voice_approval(decision),
+                        None => return true,
+                    },
                 };
-                if self.bottom_pane.apply_voice_approval(decision) {
+                if applied {
                     self.after_voice_approval_decision();
                 } else {
                     self.speak_realtime_status("That option is no longer available.");
@@ -522,6 +555,7 @@ impl ChatWidget {
                     Some(PendingVoiceApproval {
                         request_key,
                         intent,
+                        option: None,
                     });
                 self.add_info_message(prompt.clone(), /*hint*/ None);
                 self.speak_realtime_status(&prompt);
